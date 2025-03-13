@@ -8,7 +8,7 @@ if [[ -z "$base_path" ]] ; then  # error; for some reason, the path is not acces
 fi
 echo "$base_path"
 
-results_path=$base_path/../results/semisynthetic_results.csv
+results_path=$base_path/results/semisynthetic_results.csv
 if [ -f "$results_path" ]; then
   rm $results_path
 fi
