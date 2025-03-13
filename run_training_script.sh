@@ -21,7 +21,7 @@ for seed in "${seeds[@]}"; do
     for dataset_name in "${dataset_names[@]}"; do
         for strategy in "${strategies[@]}"; do
             echo "Running with seed=$seed, dataset_name=$dataset_name, strategy=$strategy"
-            python3 $base_path/../src/experiments/train_semisynthetic_datasets.py --seed "$seed" --dataset_name "$dataset_name" --strategy "$strategy"
+            python3 $base_path/src/experiments/train_semisynthetic_datasets.py --seed "$seed" --dataset_name "$dataset_name" --strategy "$strategy"
         done
     done
 done
