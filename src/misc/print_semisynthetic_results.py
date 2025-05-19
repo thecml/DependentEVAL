@@ -3,8 +3,10 @@ from pathlib import Path
 import numpy as np
 import config as cfg
 from utility.data import get_dataset_info, map_dataset_name, map_strategy_name
+from utility.survival import theta_to_kendall_tau
 
-N_DECIMALS = 2
+N_DECIMALS = 3
+SIGMA_LEVEL = 2
                 
 def calculate_errors(results, dataset, strategy, model_names, metrics):
     true_metrics = {f"{metric}True": metric for metric in ["CI", "IBS", "MAE"]}
@@ -37,7 +39,7 @@ def calculate_errors(results, dataset, strategy, model_names, metrics):
                 true_values_for_metric = true_values[true_metric_key]
                 errors = abs(true_values_for_metric - predicted_values)
                 mean_errors[metric].append(np.mean(errors))
-                std_errors[metric].append(np.std(errors))
+                std_errors[metric].append(SIGMA_LEVEL * np.std(errors))
     
     # Aggregate mean/std errors across models
     mean_errors = {k: np.nanmean(v) for k, v in mean_errors.items()}
@@ -47,14 +49,15 @@ def calculate_errors(results, dataset, strategy, model_names, metrics):
 
 if __name__ == "__main__":
     results = pd.read_csv(Path.joinpath(cfg.RESULTS_DIR, "semisynthetic_results.csv"))
-    metrics = ["CIHarrell", "CIUno", "CIDepIPCW", "IBSIPCW", "IBSDepBG",
-               "MAEUncens", "MAEHinge", "MAEPseudo", "MAEMargin", "MAEDepBG"]
     
-    # Scale metrics by percentage
-    cols_to_scale = ["CITrue", "CIHarrell", "CIUno", "CIDepIPCW", "IBSTrue", "IBSIPCW", "IBSDepBG"]
-    results[cols_to_scale] = results[cols_to_scale] * 100
-
-    datasets = ["metabric", "mimic_all", "mimic_hospital", "seer_brain", "seer_liver", "seer_stomach"]
+    # Clayton or Frank copula
+    # CI: CIHarrell, CIUno, CIDepIPCW
+    # IBS/MAE: IBSIPCW, IBSBG, IBSDepBG, MAEHinge, MAEPseudo, MAEMargin, MAEDepBG
+    #metrics = ["CIHarrell", "CIUno", "CIDepIPCW"]
+    metrics = ["IBSIPCW", "IBSBG", "IBSDepBG", "MAEHinge", "MAEPseudo", "MAEMargin", "MAEDepBG"]
+    
+    datasets = ["metabric", "mimic_all", "seer_liver"]
+    #datasets = ["metabric", "mimic_all", "mimic_hospital", "seer_brain", "seer_liver", "seer_stomach"]
     strategies = ["original", "top_5", "top_10", "random_25"]
     model_names = ["coxph", "gbsa", "rsf", "deepsurv", "mtlr"]
 
@@ -63,6 +66,11 @@ for idx, dataset in enumerate(datasets):
     print(r"\multirow{4}{*}{\makecell{" + f"{map_dataset_name(dataset)} \\\ ($N$={n_samples}, $C$={censoring_rate}\%)" + r"}}")
     for strategy in strategies:
         mean_errors, std_errors = calculate_errors(results, dataset, strategy, model_names, metrics)
+        
+        data = results.loc[(results['Dataset'] == dataset) & (results['Strategy'] == strategy)]
+        most_common_copula = data['BestCopulaName'].mode()[0]
+        mean_theta = data[data['BestCopulaName'] == most_common_copula]['BestCopulaTheta'].mean()
+        k_tau = round(theta_to_kendall_tau(most_common_copula, mean_theta), 2)
 
         # Format for printing
         formatted_errors = {

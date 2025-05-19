@@ -119,7 +119,11 @@ if __name__ == "__main__":
     time_bins = torch.cat((torch.tensor([0]).to(device), time_bins))
     
     # Estimate theta on the new dataset and find the best copula
-    results_list = []
+    copula_result = dict()
+    best_loss = float("inf")
+    best_copula_name = None
+    best_copula_theta = None
+    
     for copula_name in ["clayton", "frank"]:
         # Reset seeds
         np.random.seed(0)
@@ -129,39 +133,28 @@ if __name__ == "__main__":
         
         torch.cuda.empty_cache() # empty cache
         
-        dep_model1 = Weibull_nonlinear(n_features, dtype=dtype, device=device) # censoring model
-        dep_model2 = Weibull_nonlinear(n_features, dtype=dtype, device=device) # event model
+        dep_model1 = Weibull_nonlinear(n_features, dtype=dtype, device=device)
+        dep_model2 = Weibull_nonlinear(n_features, dtype=dtype, device=device)
+        
         if copula_name == "clayton":
             copula = Clayton_Bivariate(2.0, 1e-4, dtype=dtype, device=device)
         elif copula_name == "frank":
             copula = Frank_Bivariate(2.0, 1e-4, dtype=dtype, device=device)
+            
         dep_model1, dep_model2, copula, min_val_loss = train_copula_model(dep_model1, dep_model2, train_dict,
                                                                           valid_dict, copula=copula, n_epochs=10000,
-                                                                          patience=100, lr=0.001, batch_size=1024,
-                                                                          copula_name=copula_name, verbose=True)
+                                                                          patience=100, lr=0.001, batch_size=n_samples,
+                                                                          copula_name=copula_name, verbose=False)
         copula_theta = float(copula.parameters()[0][0])
-        k = sum(param.numel() for param in dep_model1.parameters())
-        k += sum(param.numel() for param in dep_model2.parameters())
-        k += sum(param.numel() for param in copula.parameters())
-        results_list.append({'copula_name': copula_name, 'copula_theta': copula_theta,
-                             'min_val_loss': min_val_loss, 'num_params': k})
-    results_df = pd.DataFrame(results_list)
-    results_df['AIC'] = 2*results_df['num_params'] + 2*results_df['min_val_loss'] # AIC
-    
-    # Filter for copulas that capture dependence (theta > 0.001)
-    threshold = 1e-3
-    valid_copulas = results_df[(results_df['copula_theta'].abs() >= threshold) & results_df['copula_theta'].notna()]
-
-    # Select the copula with the lowest AIC among valid copulas
-    if not valid_copulas.empty:
-        best_idx = valid_copulas['AIC'].idxmin()
-        best_copula_name = valid_copulas.loc[best_idx, 'copula_name']
-        best_copula_theta = valid_copulas.loc[best_idx, 'copula_theta']
-    else:
-        # No dependence found, assume independent copula
-        best_copula_name = "clayton"
-        best_copula_theta = 0.001
-    
+        copula_result[copula_name] = {"theta": copula_theta, "val_loss": min_val_loss}
+        
+        if min_val_loss < best_loss:
+            best_loss = min_val_loss
+            best_copula_name = copula_name
+            best_copula_theta = copula_theta
+            
+    print(f"Best copula: {best_copula_name} with theta = {best_copula_theta} and val_loss = {best_loss}")
+        
     for model_name in MODELS:
         # Reset seeds
         np.random.seed(0)
@@ -239,6 +232,9 @@ if __name__ == "__main__":
         else:
             raise NotImplementedError()
         
+        # Create results
+        model_results = pd.DataFrame()
+        
         # Make dataframe
         survival_outputs = pd.DataFrame(survival_outputs, columns=time_bins.cpu().numpy())
         survival_outputs[0] = 1
@@ -257,12 +253,15 @@ if __name__ == "__main__":
         risks = -1 * predicted_times
         ci_uno = concordance_index_ipcw(y_train, y_test, risks, tau=y_train['time'].max())[0]
         ibs_ipcw = censored_evaluator.integrated_brier_score(num_points=10)
-        mae_uncensored = censored_evaluator.mae(method="Uncensored")
+
         mae_hinge = censored_evaluator.mae(method="Hinge")
         mae_margin = censored_evaluator.mae(method="Margin", weighted=True)
-        mae_ipcwv1 = censored_evaluator.mae(method="IPCW-v1", weighted=True)
-        mae_ipcwv2 = censored_evaluator.mae(method="IPCW-v2", weighted=True)
         mae_pseudo = censored_evaluator.mae(method="Pseudo_obs", weighted=True)
+        
+        # Calculate IBS using BG KM weights
+        indep_evaluator = DependentEvaluator(survival_outputs, time_bins, data_test.time.values, data_test.event.values,
+                                             data_train.time.values, data_train.event.values, copula_name="clayton", alpha=0)
+        ibs_bg = indep_evaluator.integrated_brier_score(method="BG", num_points=10)
 
         # Calculate dependent metrics
         dep_evaluator = DependentEvaluator(survival_outputs, time_bins, data_test.time.values, data_test.event.values,
@@ -270,23 +269,20 @@ if __name__ == "__main__":
                                            alpha=best_copula_theta)
         ci_dep_ipcw = dep_evaluator.concordance(method="IPCW")[0]
         ibs_dep_bg = dep_evaluator.integrated_brier_score(method="BG", num_points=10)
-        ibs_dep_ipcw = dep_evaluator.integrated_brier_score(method="IPCW", num_points=10)
         mae_dep_bg = dep_evaluator.mae(method="BG")
-        mae_dep_ipcw = dep_evaluator.mae(method="IPCW")
 
         # Create results
-        model_results = pd.DataFrame()
-        result_row = pd.Series([seed, model_name, best_copula_name, dataset_name, strategy, best_copula_theta,
-                                ci_true, ibs_true, mae_true, ci_harrell, ci_uno, ibs_ipcw, mae_uncensored, mae_hinge, mae_margin,
-                                mae_ipcwv1, mae_ipcwv2, mae_pseudo, ci_dep_ipcw, ibs_dep_bg, ibs_dep_ipcw,
-                                mae_dep_bg, mae_dep_ipcw],
-                                index=["Seed", "ModelName", "Copula", "Dataset", "Strategy", "Theta",
-                                       "CITrue", "IBSTrue", "MAETrue", "CIHarrell", "CIUno", "IBSIPCW", "MAEUncens",
-                                       "MAEHinge", "MAEMargin", "MAEIPCWV1", "MAEIPCWV2", "MAEPseudo",
-                                       "CIDepIPCW", "IBSDepBG", "IBSDepIPCW", "MAEDepBG", "MAEDepIPCW"])
-        print(result_row)
+        result_row = pd.Series([seed, model_name, dataset_name, strategy, best_copula_name, best_copula_theta,
+                                ci_true, ibs_true, mae_true, ci_harrell, ci_uno, ibs_ipcw, ibs_bg, mae_hinge,
+                                mae_margin, mae_pseudo, ci_dep_ipcw, ibs_dep_bg, mae_dep_bg],
+                                index=["Seed", "ModelName", "Dataset", "Strategy",
+                                       "BestCopulaName", "BestCopulaTheta",
+                                       "CITrue", "IBSTrue", "MAETrue",
+                                       "CIHarrell", "CIUno", "IBSIPCW", "IBSBG",
+                                       "MAEHinge", "MAEMargin", "MAEPseudo",
+                                       "CIDepIPCW", "IBSDepBG", "MAEDepBG"])
         model_results = pd.concat([model_results, result_row.to_frame().T], ignore_index=True)
-        
+    
         # Save results
         filename = f"{cfg.RESULTS_DIR}/semisynthetic_results.csv"
         if os.path.exists(filename):
