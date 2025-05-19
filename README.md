@@ -9,7 +9,7 @@ Citation
 If you find this paper useful in your work, please consider citing it:
  
 ```
-@article{lillelund_practical_2025,
+@article{lillelund_overcoming_2025,
   title={Overcoming Dependent Censoring in the Evaluation of Survival Models}, 
   author={Christian Marius Lillelund and Shi-ang Qi and Russell Greiner},
   journal={preprint, arXiv:2502.19460},
