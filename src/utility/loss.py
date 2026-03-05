@@ -1,6 +1,5 @@
 import torch
 
-
 def masked_logsumexp(
         x: torch.Tensor,
         mask: torch.Tensor,

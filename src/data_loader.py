@@ -1,4 +1,3 @@
-import h5py
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
@@ -12,17 +11,12 @@ from dgp import DGP_Weibull_linear, DGP_Weibull_nonlinear
 import config as cfg
 from pathlib import Path
 from sksurv.datasets import load_gbsg2, load_aids, load_whas500, load_flchain
-from collections import defaultdict
 
-def _make_df(data):
-    x = data['x']
-    t = data['t']
-    d = data['e']
-    colnames = ['x'+str(i) for i in range(x.shape[1])]
-    df = (pd.DataFrame(x, columns=colnames)
-          .assign(duration=t)
-          .assign(event=d))
-    return df
+def kendall_to_pearson(tau: float) -> float:
+    if not -1 <= tau <= 1:
+        raise ValueError("Kendall's tau must be between -1 and 1.")
+    rho = np.sin(np.pi * tau / 2)
+    return rho
 
 class BaseDataLoader(ABC):
     """
@@ -86,10 +80,16 @@ def get_data_loader(dataset_name: str) -> BaseDataLoader:
         return NacdDataLoader()
     elif dataset_name == "support":
         return SupportDataLoader()
+    elif dataset_name == "flchain":
+        return FlchainDataLoader()
     elif dataset_name == "whas":
         return WhasDataLoader()
     elif dataset_name == "aids":
         return AidsDataLoader()
+    elif dataset_name == "employee":
+        return EmployeeDataLoader()
+    elif dataset_name == "churn":
+        return ChurnDataLoader()
     elif dataset_name == "seer_brain":
         return SeerBrainDataLoader()
     elif dataset_name == "seer_breast":
@@ -134,6 +134,13 @@ class SingleEventSyntheticDataLoader(BaseDataLoader):
             u = torch.tensor(rng.uniform(0, 1, n_samples), device=device, dtype=dtype)
             v = torch.tensor(rng.uniform(0, 1, n_samples), device=device, dtype=dtype)
             uv = torch.stack([u, v], dim=1)
+        elif copula_name == "gaussian":
+            rho = kendall_to_pearson(k_tau)
+            corr_matrix = np.array([[1.0, rho], [rho, 1.0]])
+            u, v = simulation.simu_gaussian(2, X.shape[0], corr_matrix)
+            u = torch.from_numpy(u).type(dtype).reshape(-1,1)
+            v = torch.from_numpy(v).type(dtype).reshape(-1,1)
+            uv = torch.cat([u, v], axis=1)
         else:
             theta = kendall_tau_to_theta(copula_name, k_tau)
             u, v = simulation.simu_archimedean(copula_name, 2, X.shape[0], theta=theta)
@@ -292,6 +299,27 @@ class SupportDataLoader(BaseDataLoader):
     def split_data(self, train_size: float, valid_size: float,
                    test_size: float, dtype=torch.float64, random_state=0):
         raise NotImplementedError()
+    
+class FlchainDataLoader(BaseDataLoader):
+    def load_data(self, n_samples:int = None) -> None:
+        X, y = load_flchain()
+        X['event'] = y['death']
+        X['time'] = y['futime']
+
+        X = X.loc[X['time'] > 0]
+        self.y = convert_to_structured(X['time'], X['event'])
+        X = X.drop(['event', 'time'], axis=1).reset_index(drop=True)
+        
+        self.num_features = ['age', 'creatinine', 'kappa', 'lambda', 'sample.yr']
+        self.cat_features = ['chapter', 'flc.grp', 'mgus', 'sex']
+
+        self.X = pd.DataFrame(X)
+        
+        return self
+    
+    def split_data(self, train_size: float, valid_size: float,
+                   test_size: float, dtype=torch.float64, random_state=0):
+        raise NotImplementedError()
 
 class AidsDataLoader(BaseDataLoader):
     def load_data(self) -> None:
@@ -301,6 +329,55 @@ class AidsDataLoader(BaseDataLoader):
         self.y = convert_to_structured(y['time'], y['censor'])
         self.num_features = ['age', 'cd4', 'karnof', 'priorzdv']
         self.cat_features = ['hemophil', 'ivdrug', 'raceth', 'sex', 'strat2', 'tx', 'txgrp']
+        
+        return self
+    
+    def split_data(self,
+                train_size: float,
+                valid_size: float,
+                test_size: float,
+                dtype=torch.float64,
+                random_state=0):
+        raise NotImplementedError()
+    
+class EmployeeDataLoader(BaseDataLoader):
+    def load_data(self) -> None:
+        retention = pd.read_csv(Path.joinpath(cfg.DATA_DIR, 'employee_attrition.csv')).rename(
+            columns={"time_spend_company": "time", "left": "event"})
+        
+        self.X = pd.DataFrame(retention.drop(['time', 'event'], axis=1))
+        self.y = convert_to_structured(retention['time'], retention['event'])
+        
+        self.cat_features = ['department', 'salary']
+        self.num_features = ['satisfaction_level', 'last_evaluation', 'number_projects', 'average_montly_hours',
+                             'work_accident', 'promotion_last_5years']
+        
+        return self
+    
+    def split_data(self,
+                train_size: float,
+                valid_size: float,
+                test_size: float,
+                dtype=torch.float64,
+                random_state=0):
+        raise NotImplementedError()
+    
+class ChurnDataLoader(BaseDataLoader):
+    def load_data(self) -> None:
+        churn = pd.read_csv(Path.joinpath(cfg.DATA_DIR, 'churn.csv')) \
+                .rename(columns={"months_active": "time", "churned": "event"})
+        churn.event = churn.event.astype(int)
+
+        churn = churn.drop(churn[churn["time"] <= 0].index)
+        churn.reset_index(drop=True, inplace=True)
+        
+        self.X = pd.DataFrame(churn.drop(['time', 'event'], axis=1))
+        self.y = convert_to_structured(churn['time'], churn['event'])
+        
+        self.cat_features = ['us_region', 'product_travel_expense', 'product_payroll', 'product_accounting', 'company_size']
+        self.num_features = ['product_data_storage', 'csat_score', 'articles_viewed', 'smartphone_notifications_viewed',
+                             'social_media_ads_viewed', 'marketing_emails_clicked', 'minutes_customer_support',]
+        
         return self
     
     def split_data(self,

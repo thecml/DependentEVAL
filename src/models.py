@@ -236,23 +236,31 @@ class Weibull_log_linear:
         tmp1 = torch.matmul(x, self.coeff) + self.mu
         return torch.exp(tmp+tmp1)
     
-class Weibull_nonlinear(nn.Module):
-    def __init__(self, n_features, hidden_units=32, device="cpu", dtype=torch.float64):
-        super(Weibull_nonlinear, self).__init__()
+class Weibull_model(nn.Module):
+    def __init__(self, n_features, hidden_units=32,
+                 non_linear=False, device="cpu",
+                 dtype=torch.float64):
+        super(Weibull_model, self).__init__()
         self.device = device
         self.dtype = dtype
+        self.non_linear = non_linear
         
         # Weibull parameters
         self.mu = nn.Parameter(torch.rand(1, device=device, dtype=dtype))
         self.sigma = nn.Parameter(torch.rand(1, device=device, dtype=dtype))
         
-        # Nonlinear neural network for covariate transformation
-        self.net = nn.Sequential(
-            nn.Linear(n_features, hidden_units, device=device, dtype=dtype),
-            nn.BatchNorm1d(hidden_units).to(device),
-            nn.ReLU(),
-            nn.Linear(hidden_units, 1, device=device, dtype=dtype)
-        )
+        # Neural network for covariate transformation
+        if self.non_linear:
+            self.net = nn.Sequential(
+                nn.Linear(n_features, hidden_units, device=device, dtype=dtype),
+                nn.BatchNorm1d(hidden_units).to(device),
+                nn.ReLU(),
+                nn.Linear(hidden_units, 1, device=device, dtype=dtype)
+            )
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(n_features, 1, device=device, dtype=dtype)
+            )
 
     def survival(self, t, x):
         linear_pred = self.net(x).squeeze(-1)  # Nonlinear transformation of input
@@ -277,7 +285,7 @@ class Weibull_nonlinear(nn.Module):
             param.requires_grad = True
 
     def parameters(self):
-        return list(super(Weibull_nonlinear, self).parameters())
+        return list(super(Weibull_model, self).parameters())
 
     def rvs(self, x, u):
         linear_pred = self.net(x).squeeze(-1)

@@ -1,14 +1,19 @@
-from sksurv.linear_model import CoxPHSurvivalAnalysis, CoxnetSurvivalAnalysis
+from sksurv.linear_model import CoxPHSurvivalAnalysis
 from sksurv.ensemble import GradientBoostingSurvivalAnalysis
 from sksurv.ensemble import RandomSurvivalForest
-import torch
-import numpy as np
-import pandas as pd
+
+from sota.weibull_aft import WeibullAFTWrapper
 
 def make_cox_model(config):
     n_iter = config['n_iter']
     tol = config['tol']
     model = CoxPHSurvivalAnalysis(alpha=0.0001)
+    return model
+
+def make_weibull_aft_model(config):
+    penalizer = config['penalizer']
+    l1_ratio = config['l1_ratio']
+    model = WeibullAFTWrapper(penalizer=penalizer, l1_ratio=l1_ratio)
     return model
 
 def make_gbsa_model(config):

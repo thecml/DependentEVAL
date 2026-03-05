@@ -155,13 +155,22 @@ class DGP_EXP_nonlinear(DGP_Exp_linear):  # This is the nonlinear exponential PH
         return list(self.net.parameters()) + [self.bh]
 
 class DGP_Weibull_linear:
-    def __init__(self, n_features, alpha: float, gamma: float, device="cpu", dtype=torch.float64):
+    def __init__(self, n_features, alpha: float, gamma: float, use_x=True,
+                 device="cpu", dtype=torch.float64, coeff=None, generator=None):
         self.alpha = torch.tensor([alpha], device=device).type(dtype)
         self.gamma = torch.tensor([gamma], device=device).type(dtype)
+        self.use_x = use_x
         self.device = device
         self.dtype = dtype
-        self.coeff = 2 * torch.rand((n_features,), device=device).type(dtype) - 1
-    
+
+        if coeff is not None:
+            self.coeff = coeff.to(device=device, dtype=dtype)
+        else:
+            if generator is None:
+                self.coeff = 2 * torch.rand((n_features,), device=device).type(dtype) - 1
+            else:
+                self.coeff = 2 * torch.rand((n_features,), generator=generator, device=device, dtype=dtype) - 1
+
     def PDF(self, t, x):
         return self.hazard(t, x) * self.survival(t, x)
     
@@ -172,57 +181,99 @@ class DGP_Weibull_linear:
         return torch.exp(-self.cum_hazard(t, x))
     
     def hazard(self, t, x):
-        linear_term = torch.matmul(x, self.coeff)
+        linear_term = torch.matmul(x, self.coeff) if self.use_x else 0.0
         return ((self.gamma / self.alpha) * ((t / self.alpha) ** (self.gamma - 1))) * torch.exp(linear_term)
-    
+
     def cum_hazard(self, t, x):
-        linear_term = torch.matmul(x, self.coeff)
+        linear_term = torch.matmul(x, self.coeff) if self.use_x else 0.0
         return ((t / self.alpha) ** self.gamma) * torch.exp(linear_term)
 
     def parameters(self):
         return [self.alpha, self.gamma, self.coeff]
     
     def rvs(self, x, u):
-        linear_term = torch.matmul(x, self.coeff)
+        zero = torch.zeros((x.shape[0],), device=x.device, dtype=x.dtype)
+        linear_term = torch.matmul(x, self.coeff) if self.use_x else zero
         survival_term = -torch.log(u) / torch.exp(linear_term)
         result = (survival_term ** (1 / self.gamma)) * self.alpha
         return result.detach().cpu().numpy()
     
 class DGP_Weibull_nonlinear:
-    def __init__(self, n_features, alpha: float, gamma: float,
-                 hidden_dim: int=32, device="cpu", dtype=torch.float64):
-        self.alpha = torch.tensor([alpha], device=device).type(dtype)
-        self.gamma = torch.tensor([gamma], device=device).type(dtype)
+    def __init__(self, n_features, alpha: float, gamma: float, hidden_dim: int = 32,
+                 use_x: bool = True, device: str = "cpu", dtype: torch.dtype = torch.float64,
+                 coeff=None, generator=None):
+        self.alpha = torch.tensor([alpha], device=device, dtype=dtype)
+        self.gamma = torch.tensor([gamma], device=device, dtype=dtype)
+        self.use_x = use_x
         self.device = device
         self.dtype = dtype
+
+        # Build net
         self.net = nn.Sequential(
             nn.Linear(n_features, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        ).to(device).type(dtype)
-    
+            nn.Linear(hidden_dim, 1),
+        ).to(device=device, dtype=dtype)
+
+        # Optional: reuse externally-provided parameters (like coeff in linear DGP)
+        # Here, `coeff` is interpreted as a state_dict for the network.
+        if coeff is not None:
+            # Accept either a plain state_dict or an nn.Module (from which we take state_dict)
+            state = coeff.state_dict() if hasattr(coeff, "state_dict") else coeff
+            self.net.load_state_dict(state)
+
+        # Optional: reproducible initialization
+        elif generator is not None:
+            self._reset_parameters_with_generator(generator)
+
+    def _reset_parameters_with_generator(self, generator: torch.Generator):
+        """
+        Re-initialize net weights deterministically using the provided torch.Generator.
+        """
+        for m in self.net.modules():
+            if isinstance(m, nn.Linear):
+                # Keep it simple: uniform init in [-bound, bound] like common defaults,
+                # but using the passed generator for reproducibility.
+                fan_in = m.weight.shape[1]
+                bound = 1.0 / (fan_in ** 0.5)
+
+                m.weight.data = (2 * torch.rand_like(m.weight, generator=generator) - 1) * bound
+                if m.bias is not None:
+                    m.bias.data = (2 * torch.rand_like(m.bias, generator=generator) - 1) * bound
+
     def PDF(self, t, x):
         return self.hazard(t, x) * self.survival(t, x)
-    
+
     def CDF(self, t, x):
         return 1 - self.survival(t, x)
-    
+
     def survival(self, t, x):
         return torch.exp(-self.cum_hazard(t, x))
-    
+
+    def _nonlinear_term(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Returns exp(net(x)) squeezed to shape (n,) (or scalar if n=1),
+        or 1.0 if use_x=False (so you recover the baseline Weibull).
+        """
+        if not self.use_x:
+            # baseline hazard multiplier
+            return torch.ones((x.shape[0],), device=x.device, dtype=x.dtype)
+        return torch.exp(self.net(x)).squeeze(-1)
+
     def hazard(self, t, x):
-        nonlinear_term = torch.exp(self.net(x)).squeeze()
-        return ((self.gamma / self.alpha) * ((t / self.alpha) ** (self.gamma - 1))) * nonlinear_term
-    
+        nonlinear_term = self._nonlinear_term(x)
+        base = (self.gamma / self.alpha) * ((t / self.alpha) ** (self.gamma - 1))
+        return base * nonlinear_term
+
     def cum_hazard(self, t, x):
-        nonlinear_term = torch.exp(self.net(x)).squeeze()
+        nonlinear_term = self._nonlinear_term(x)
         return ((t / self.alpha) ** self.gamma) * nonlinear_term
 
     def parameters(self):
         return [self.alpha, self.gamma] + list(self.net.parameters())
-    
+
     def rvs(self, x, u):
-        nonlinear_term = torch.exp(self.net(x)).squeeze()
+        nonlinear_term = self._nonlinear_term(x)
         survival_term = -torch.log(u) / nonlinear_term
         result = (survival_term ** (1 / self.gamma)) * self.alpha
         return result.detach().cpu().numpy()

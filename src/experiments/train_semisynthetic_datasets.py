@@ -7,24 +7,19 @@ from data_loader import get_data_loader
 import pandas as pd
 import numpy as np
 import config as cfg
-from metrics import DependentEvaluator
+from evaluator import DependentEvaluator
 from sota.deepsurv import DeepSurv, make_deepsurv_prediction, train_deepsurv_model
 from sota.mtlr import make_mtlr_prediction, mtlr, train_mtlr_model
-from sota.sksurv import make_cox_model, make_gbsa_model, make_rsf_model
-from utility.data import dotdict, fix_types
+from sota.sksurv import make_cox_model, make_gbsa_model, make_rsf_model, make_weibull_aft_model
+from utility.data import dotdict, subsample_dataset, fix_types
 from SurvivalEVAL import SurvivalEvaluator
-from SurvivalEVAL.Evaluations.util import predict_median_survival_time
 from scipy.interpolate import interp1d
 
-from models import Weibull_log_linear, Weibull_nonlinear
-from strategies import combine_data_with_censor, make_synthetic_censoring
+from models import Weibull_model
+from strategies import make_semi_synth
 from utility.preprocessor import Preprocessor
 from utility.survival import convert_to_structured, make_stratified_split, make_time_bins
 from trainer import train_copula_model
-
-from sksurv.linear_model import CoxPHSurvivalAnalysis
-from sksurv.ensemble import GradientBoostingSurvivalAnalysis, RandomSurvivalForest
-from sksurv.metrics import concordance_index_ipcw
 
 import time
 
@@ -41,7 +36,6 @@ MODELS = ["coxph", "gbsa", "rsf", "deepsurv", "mtlr"]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--dataset_name', type=str, default='metabric')
     parser.add_argument('--strategy', type=str, default='original')
@@ -64,32 +58,33 @@ if __name__ == "__main__":
     X = transformer.transform(df_full.drop(['time', 'event'], axis=1)).reset_index(drop=True)
     df_full = pd.concat([X, df_full[['time', 'event']]], axis=1)
     
-    # Drop censored rows
-    df = df_full.drop(df_full[df_full.event == 0].index)
-    df.reset_index(drop=True, inplace=True)
-    df.time = df.time.round().astype(int)
+    # Make semi-synthetic dataset
+    df_synth = make_semi_synth(df_full, strategy=strategy)
     
-    # Make synthetic censoring time
-    censor_times, selected_features = make_synthetic_censoring(strategy, df, df_full)
-    censor_times = np.round(censor_times).astype(int)
-    
-    # Combine truth and censored data to make semi-synthetic dataset
-    df = combine_data_with_censor(df, censor_times, selected_features)
-    
+    # Subsample
+    if dataset_name == "employee":
+        df_subsample = subsample_dataset(df_synth.copy(), dataset_name, target_size=10000)
+    elif dataset_name == "mimic_all":
+        df_subsample = subsample_dataset(df_synth.copy(), dataset_name, target_size=10000)
+    elif dataset_name in ["seer_brain", "seer_liver", "seer_stomach"]:
+        df_subsample = subsample_dataset(df_synth.copy(), dataset_name, target_size=10000)
+    else:
+        df_subsample = df_synth
+        
     # Split data
-    df_train, df_valid, df_test = make_stratified_split(df, stratify_colname='both', frac_train=0.7,
+    df_train, df_valid, df_test = make_stratified_split(df_subsample, stratify_colname='both', frac_train=0.7,
                                                         frac_valid=0.1, frac_test=0.2,
                                                         random_state=seed)
     
-    # Adjust types
+    # Fix types
     df_train, df_valid, df_test = fix_types(df_train, df_valid, df_test)
   
     # Process data
-    data_train = df_train.drop(columns=["true_time"])
+    data_train = df_train.drop(columns=["true_time", "true_censor"])
     true_test_time = df_test.true_time.values
     true_test_event = np.ones(df_test.shape[0])
-    data_valid = df_valid.drop(columns=["true_time"])
-    data_test = df_test.drop(columns=["true_time"])
+    data_valid = df_valid.drop(columns=["true_time", "true_censor"])
+    data_test = df_test.drop(columns=["true_time", "true_censor"])
     X_train = data_train.drop(columns=["time", "event"])
     X_valid = data_valid.drop(columns=["time", "event"])
     X_test = data_test.drop(columns=["time", "event"])
@@ -119,42 +114,126 @@ if __name__ == "__main__":
     time_bins = torch.cat((torch.tensor([0]).to(device), time_bins))
     
     # Estimate theta on the new dataset and find the best copula
-    copula_result = dict()
-    best_loss = float("inf")
+    copula_param_path = f"{cfg.RESULTS_DIR}/copula_parameters.csv"
     best_copula_name = None
     best_copula_theta = None
+        
+    # Try to load cached copula parameters
+    if os.path.exists(copula_param_path):
+        cop_df = pd.read_csv(copula_param_path)
+        match = cop_df[
+            (cop_df["Seed"] == seed) &
+            (cop_df["Dataset"] == dataset_name) &
+            (cop_df["Strategy"] == strategy)
+        ]
+        if len(match) == 1:
+            best_copula_name = match.iloc[0]["BestCopulaName"]
+            best_copula_theta = match.iloc[0]["BestCopulaTheta"]
+            print(f"Loaded cached copula: {best_copula_name} (θ={best_copula_theta})")
+            copula_runtime = 0.0
+            copula_memory_used = 0.0
     
-    for copula_name in ["clayton", "frank"]:
-        # Reset seeds
-        np.random.seed(0)
-        torch.manual_seed(0)
-        torch.cuda.manual_seed_all(0)
-        random.seed(0)
-        
-        torch.cuda.empty_cache() # empty cache
-        
-        dep_model1 = Weibull_nonlinear(n_features, dtype=dtype, device=device)
-        dep_model2 = Weibull_nonlinear(n_features, dtype=dtype, device=device)
-        
-        if copula_name == "clayton":
-            copula = Clayton_Bivariate(2.0, 1e-4, dtype=dtype, device=device)
-        elif copula_name == "frank":
-            copula = Frank_Bivariate(2.0, 1e-4, dtype=dtype, device=device)
-            
-        dep_model1, dep_model2, copula, min_val_loss = train_copula_model(dep_model1, dep_model2, train_dict,
-                                                                          valid_dict, copula=copula, n_epochs=10000,
-                                                                          patience=100, lr=0.001, batch_size=n_samples,
-                                                                          copula_name=copula_name, verbose=False)
-        copula_theta = float(copula.parameters()[0][0])
-        copula_result[copula_name] = {"theta": copula_theta, "val_loss": min_val_loss}
-        
-        if min_val_loss < best_loss:
-            best_loss = min_val_loss
-            best_copula_name = copula_name
-            best_copula_theta = copula_theta
-            
-    print(f"Best copula: {best_copula_name} with theta = {best_copula_theta} and val_loss = {best_loss}")
-        
+    # If not cached, then perform training
+    if best_copula_name is None:
+        copula_result = dict()
+        best_loss = float("inf")
+
+        # robust timing + peak memory (MiB)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+            copula_mem_baseline = torch.cuda.memory_allocated(device)
+        else:
+            copula_mem_baseline = 0
+
+        copula_start_time = time.time()
+
+        for copula_name in ["clayton", "frank"]:
+            # Reset seeds
+            np.random.seed(0)
+            torch.manual_seed(0)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(0)
+            random.seed(0)
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            dep_model1 = Weibull_model(n_features, dtype=dtype, device=device)
+            dep_model2 = Weibull_model(n_features, dtype=dtype, device=device)
+
+            if copula_name == "clayton":
+                copula = Clayton_Bivariate(2.0, 1e-4, dtype=dtype, device=device)
+            elif copula_name == "frank":
+                copula = Frank_Bivariate(2.0, 1e-4, dtype=dtype, device=device)
+            else:
+                raise ValueError(f"Unknown copula_name={copula_name}")
+
+            dep_model1, dep_model2, copula, min_val_loss = train_copula_model(
+                dep_model1, dep_model2, train_dict, valid_dict,
+                copula=copula, n_epochs=30000, lr=0.01,
+                batch_size=n_samples, copula_name=copula_name, verbose=False
+            )
+
+            copula_theta = float(copula.theta.item())
+            copula_result[copula_name] = {"theta": copula_theta, "val_loss": float(min_val_loss)}
+
+            if min_val_loss < best_loss:
+                best_loss = float(min_val_loss)
+                best_copula_name = copula_name
+                best_copula_theta = copula_theta
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+        copula_end_time = time.time()
+
+        copula_runtime = copula_end_time - copula_start_time
+
+        # Peak allocated memory during the whole copula-fitting block (MiB)
+        if torch.cuda.is_available():
+            copula_peak_alloc = torch.cuda.max_memory_allocated(device)
+            copula_memory_used = (copula_peak_alloc - copula_mem_baseline) / (1024 ** 2)  # MiB
+            # Guard against tiny negative due to allocator bookkeeping
+            copula_memory_used = max(0.0, float(copula_memory_used))
+        else:
+            copula_memory_used = 0.0
+
+        print(f"Best copula: {best_copula_name} with theta = {best_copula_theta} and val_loss = {best_loss}")
+
+        # Save to copula_parameters.csv
+        new_row = pd.DataFrame([{
+            "Seed": seed,
+            "Dataset": dataset_name,
+            "Strategy": strategy,
+            "BestCopulaName": best_copula_name,
+            "BestCopulaTheta": best_copula_theta
+        }])
+
+        if os.path.exists(copula_param_path):
+            existing = pd.read_csv(copula_param_path)
+            existing = pd.concat([existing, new_row], ignore_index=True).drop_duplicates()
+            existing.to_csv(copula_param_path, index=False)
+        else:
+            new_row.to_csv(copula_param_path, index=False)
+
+    print(f"Copula fitting done. Time: {copula_runtime:.2f}s | Peak GPU Mem: {copula_memory_used:.2f} MiB")
+    
+    # Create results
+    model_results = pd.DataFrame(columns=[
+        "Seed", "ModelName", "Dataset", "Strategy",
+        "BestCopulaName", "BestCopulaTheta",
+        "IBSTrue", "IBSUncensored", "IBSIPCW",
+        "IBSIndepBG", "IBSIndepBGUW", "IBSDepBG", "IBSDepBGUW",
+    ])
+    
+    # Create runtime log
+    runtime_log = pd.DataFrame(columns=[
+        "Seed", "ModelName", "Dataset", "Strategy",
+        "CopulaRuntime", "CopulaMemoryUsed",
+        "IBSUncensTime", "IBSIPCWTime", "IBSIndepBGTime",
+        "IBSIndepBGUWTime", "IBSDepBGTime", "IBSDepBGUWTime",
+    ])
+    
     for model_name in MODELS:
         # Reset seeds
         np.random.seed(0)
@@ -202,6 +281,10 @@ if __name__ == "__main__":
             model = train_mtlr_model(model, data_train, data_valid, time_bins.cpu().numpy(),
                                      config, random_state=0, dtype=dtype,
                                      reset_model=True, device=device)
+        elif model_name == "weibullaft":
+            config = dotdict(cfg.WEIBULL_AFT_PARAMS)
+            model = make_weibull_aft_model(config)
+            model.fit(X_train, y_train)
         else:
             raise NotImplementedError()
         end_time = time.time()
@@ -229,66 +312,104 @@ if __name__ == "__main__":
                                           dtype=dtype, device=device)
             survival_outputs, _, _ = make_mtlr_prediction(model, mtlr_test_data, time_bins, config)
             survival_outputs = survival_outputs[:, 1:].cpu().numpy()
+        elif model_name == "weibullaft":
+            times_numpy = time_bins.cpu().numpy()
+            X_test_df = pd.DataFrame(test_dict['X'].cpu().numpy(),
+                                     columns=model.feature_names_)
+            surv_df = model.model.predict_survival_function(X_test_df, times=times_numpy)
+            preds_array = np.minimum(np.asarray(surv_df.T), 1.0)
+            survival_outputs = pd.DataFrame(preds_array, columns=times_numpy)
         else:
             raise NotImplementedError()
-        
-        # Create results
-        model_results = pd.DataFrame()
         
         # Make dataframe
         survival_outputs = pd.DataFrame(survival_outputs, columns=time_bins.cpu().numpy())
         survival_outputs[0] = 1
         
-        # Create true evaluator to calculate true metrics
+        # Create true evaluator to calculate true IBS
         true_evaluator = SurvivalEvaluator(survival_outputs, time_bins, true_test_time, true_test_event)
-        ci_true = true_evaluator.concordance()[0]
         ibs_true = true_evaluator.integrated_brier_score(IPCW_weighted=False, num_points=10)
-        mae_true = true_evaluator.mae(method="Uncensored")
-        
-        # Calculate censored metrics
-        censored_evaluator = SurvivalEvaluator(survival_outputs, time_bins, data_test.time.values, data_test.event.values,
+        original_evaluator = SurvivalEvaluator(survival_outputs, time_bins,
+                                               data_test.time.values, data_test.event.values,
                                                data_train.time.values, data_train.event.values)
-        ci_harrell = censored_evaluator.concordance()[0]
-        predicted_times = censored_evaluator.predict_time_from_curve(predict_median_survival_time)
-        risks = -1 * predicted_times
-        ci_uno = concordance_index_ipcw(y_train, y_test, risks, tau=y_train['time'].max())[0]
-        ibs_ipcw = censored_evaluator.integrated_brier_score(num_points=10)
-
-        mae_hinge = censored_evaluator.mae(method="Hinge")
-        mae_margin = censored_evaluator.mae(method="Margin", weighted=True)
-        mae_pseudo = censored_evaluator.mae(method="Pseudo_obs", weighted=True)
+        # Calculate IBS
+        ibs_uncens_start_time = time.time()
+        ibs_uncens = original_evaluator.integrated_brier_score(IPCW_weighted=False, num_points=10)
+        ibs_uncens_end_time = time.time()
+        ibs_uncens_time = ibs_uncens_end_time - ibs_uncens_start_time
         
-        # Calculate IBS using BG KM weights
+        ibs_ipcw_start_time = time.time()
+        ibs_ipcw = original_evaluator.integrated_brier_score(num_points=10)
+        ibs_ipcw_end_time = time.time()
+        ibs_ipcw_time = ibs_ipcw_end_time - ibs_ipcw_start_time
+        
+        # Calculate independent metrics CI/IBS/MAE
         indep_evaluator = DependentEvaluator(survival_outputs, time_bins, data_test.time.values, data_test.event.values,
                                              data_train.time.values, data_train.event.values, copula_name="clayton", alpha=0)
-        ibs_bg = indep_evaluator.integrated_brier_score(method="BG", num_points=10)
+        
+        ibs_indep_bg_start_time = time.time()
+        ibs_indep_bg = indep_evaluator.integrated_brier_score(method="BG", num_points=10)
+        ibs_indep_bg_end_time = time.time()
+        ibs_indep_bg_time = ibs_indep_bg_end_time - ibs_indep_bg_start_time
+
+        ibs_indep_bguw_start_time = time.time()
+        ibs_indep_bguw = indep_evaluator.integrated_brier_score(method="BG_UW", num_points=10)
+        ibs_indep_bguw_end_time = time.time()
+        ibs_indep_bguw_time = ibs_indep_bguw_end_time - ibs_indep_bguw_start_time
 
         # Calculate dependent metrics
         dep_evaluator = DependentEvaluator(survival_outputs, time_bins, data_test.time.values, data_test.event.values,
                                            data_train.time.values, data_train.event.values, copula_name=best_copula_name,
                                            alpha=best_copula_theta)
-        ci_dep_ipcw = dep_evaluator.concordance(method="IPCW")[0]
+            
+        ibs_dep_bg_start_time = time.time()
         ibs_dep_bg = dep_evaluator.integrated_brier_score(method="BG", num_points=10)
-        mae_dep_bg = dep_evaluator.mae(method="BG")
+        ibs_dep_bg_end_time = time.time()
+        ibs_dep_bg_time = ibs_dep_bg_end_time - ibs_dep_bg_start_time
 
-        # Create results
-        result_row = pd.Series([seed, model_name, dataset_name, strategy, best_copula_name, best_copula_theta,
-                                ci_true, ibs_true, mae_true, ci_harrell, ci_uno, ibs_ipcw, ibs_bg, mae_hinge,
-                                mae_margin, mae_pseudo, ci_dep_ipcw, ibs_dep_bg, mae_dep_bg],
-                                index=["Seed", "ModelName", "Dataset", "Strategy",
-                                       "BestCopulaName", "BestCopulaTheta",
-                                       "CITrue", "IBSTrue", "MAETrue",
-                                       "CIHarrell", "CIUno", "IBSIPCW", "IBSBG",
-                                       "MAEHinge", "MAEMargin", "MAEPseudo",
-                                       "CIDepIPCW", "IBSDepBG", "MAEDepBG"])
-        model_results = pd.concat([model_results, result_row.to_frame().T], ignore_index=True)
-    
-        # Save results
-        filename = f"{cfg.RESULTS_DIR}/semisynthetic_results.csv"
-        if os.path.exists(filename):
-            results = pd.read_csv(filename)
-        else:
-            results = pd.DataFrame(columns=model_results.columns)
-        results = results.append(model_results, ignore_index=True)
-        results.to_csv(filename, index=False)
+        ibs_dep_bguw_start_time = time.time()
+        ibs_dep_bguw = dep_evaluator.integrated_brier_score(method="BG_UW", num_points=10)
+        ibs_dep_bguw_end_time = time.time()
+        ibs_dep_bguw_time = ibs_dep_bguw_end_time - ibs_dep_bguw_start_time
         
+        # Create results
+        result_row = pd.Series([
+            seed, model_name, dataset_name, strategy,
+            best_copula_name, best_copula_theta,
+            ibs_true, ibs_uncens, ibs_ipcw,
+            ibs_indep_bg, ibs_indep_bguw, ibs_dep_bg, ibs_dep_bguw,
+        ], index=model_results.columns)
+        model_results = pd.concat(
+            [model_results, result_row.to_frame().T],
+            ignore_index=True
+        )
+        
+        # Create timing results
+        runtime_row = pd.Series([
+            seed, model_name, dataset_name, strategy,
+            copula_runtime, copula_memory_used,
+            ibs_uncens_time, ibs_ipcw_time, ibs_indep_bg_time,
+            ibs_indep_bguw_time, ibs_dep_bg_time, ibs_dep_bguw_time,
+        ], index=runtime_log.columns)
+
+        runtime_log = pd.concat(
+            [runtime_log, runtime_row.to_frame().T],
+            ignore_index=True
+        )
+    
+    results_path = f"{cfg.RESULTS_DIR}/semisynthetic_results.csv"
+    runtime_log_path = f"{cfg.RESULTS_DIR}/semisynthetic_results_timing.csv"
+    
+    os.makedirs(cfg.RESULTS_DIR, exist_ok=True)
+    
+    # Save model results
+    if os.path.exists(results_path):
+        existing_results = pd.read_csv(results_path)
+        model_results = pd.concat([existing_results, model_results], ignore_index=True)
+    model_results.to_csv(results_path, index=False)
+
+    # Save runtime logs
+    if os.path.exists(runtime_log_path):
+        existing_runtime = pd.read_csv(runtime_log_path)
+        runtime_log = pd.concat([existing_runtime, runtime_log], ignore_index=True)
+    runtime_log.to_csv(runtime_log_path, index=False)
