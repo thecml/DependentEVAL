@@ -6,26 +6,27 @@ Preprint: https://arxiv.org/abs/2502.19460 **(Under review)**
 
 ## Usage: Dependent Integrated Brier Score (IBS)
 
-`DependentEvaluator` computes a dependent-censoring-aware Integrated Brier Score.
+`DependentEvaluator` computes a dependent-censoring-aware Integrated Brier Score (IBS).  
 
 ```python
 import time
 from dependenteval import DependentEvaluator  # adjust import path if needed
 
 # survival_outputs: array of predicted survival curves, shape (n_test, n_time_bins)
-# time_bins: array of time coordinates for the survival curves, shape (n_time_bins,)
-# data_test.time / data_test.event: test event times and indicators
-# data_train.time / data_train.event: train event times and indicators
-
+# time_coordinates: array of time coordinates for the survival curves, shape (n_time_bins,)
+# test_event_times / test_event_indicators: test event times and indicators
+# train_event_times / train_event_indicators: train event times and indicators
+# copula_name: copula family name (eg, "clayton")
+# alpha: dependence parameter (eg, 2.0)
 dep_evaluator = DependentEvaluator(
     predicted_survival_curves=survival_outputs,
     time_coordinates=time_bins,
-    test_event_times=data_test.time.values,
-    test_event_indicators=data_test.event.values,
-    train_event_times=data_train.time.values,
-    train_event_indicators=data_train.event.values,
-    copula_name=best_copula_name,
-    alpha=best_copula_theta,
+    test_event_times=test_times,
+    test_event_indicators=test_events,
+    train_event_times=train_times,
+    train_event_indicators=train_events,
+    copula_name=copula_name,
+    alpha=alpha,
 )
 
 # Dependent IBS (BG, no uncertainty weighting)
