@@ -297,7 +297,7 @@ def run_bias_vs_tau_experiment(
                     df_train["time"].values, df_train["event"].values,
                     copula_name=str(copula_name), alpha=theta
                 )
-                ibs_dep_bguw = float(dep_eval.integrated_brier_score(method="BG_UW", num_points=num_points))
+                ibs_dep_bguw = float(dep_eval.integrated_brier_score(num_points=num_points))
 
                 rows.append({
                     "seed": int(seed),

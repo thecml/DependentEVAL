@@ -387,7 +387,7 @@ def run_wrong_copula_experiment(
                         copula_name=str(assumed_copula),
                         alpha=theta,
                     )
-                    ibs_dep_bguw = float(dep_eval.integrated_brier_score(method="BG_UW", num_points=num_points))
+                    ibs_dep_bguw = float(dep_eval.integrated_brier_score(num_points=num_points))
 
                     rows.append({
                         "experiment": str(exp),

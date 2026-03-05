@@ -348,12 +348,12 @@ if __name__ == "__main__":
                                              data_train.time.values, data_train.event.values, copula_name="clayton", alpha=0)
         
         ibs_indep_bg_start_time = time.time()
-        ibs_indep_bg = indep_evaluator.integrated_brier_score(method="BG", num_points=10)
+        ibs_indep_bg = indep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=False)
         ibs_indep_bg_end_time = time.time()
         ibs_indep_bg_time = ibs_indep_bg_end_time - ibs_indep_bg_start_time
 
         ibs_indep_bguw_start_time = time.time()
-        ibs_indep_bguw = indep_evaluator.integrated_brier_score(method="BG_UW", num_points=10)
+        ibs_indep_bguw = indep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=True)
         ibs_indep_bguw_end_time = time.time()
         ibs_indep_bguw_time = ibs_indep_bguw_end_time - ibs_indep_bguw_start_time
 
@@ -363,12 +363,12 @@ if __name__ == "__main__":
                                            alpha=best_copula_theta)
             
         ibs_dep_bg_start_time = time.time()
-        ibs_dep_bg = dep_evaluator.integrated_brier_score(method="BG", num_points=10)
+        ibs_dep_bg = dep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=False)
         ibs_dep_bg_end_time = time.time()
         ibs_dep_bg_time = ibs_dep_bg_end_time - ibs_dep_bg_start_time
 
         ibs_dep_bguw_start_time = time.time()
-        ibs_dep_bguw = dep_evaluator.integrated_brier_score(method="BG_UW", num_points=10)
+        ibs_dep_bguw = dep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=True)
         ibs_dep_bguw_end_time = time.time()
         ibs_dep_bguw_time = ibs_dep_bguw_end_time - ibs_dep_bguw_start_time
         
