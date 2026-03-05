@@ -6,7 +6,7 @@ Preprint: https://arxiv.org/abs/2502.19460 **(Under review)**
 
 ## Usage: Dependent Integrated Brier Score (IBS)
 
-`DependentEvaluator` computes a dependent-censoring-aware Integrated Brier Score using Best-Guess (BG) imputation based on a Copula-Graphic model fitted on the training set.
+`DependentEvaluator` computes a dependent-censoring-aware Integrated Brier Score.
 
 ```python
 import time
@@ -29,29 +29,25 @@ dep_evaluator = DependentEvaluator(
 )
 
 # Dependent IBS (BG, no uncertainty weighting)
-t0 = time.time()
 ibs_dep_bg = dep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=False)
-print("Dependent IBS (BG):", ibs_dep_bg, "time:", time.time() - t0)
+print("Dependent IBS (BG):", ibs_dep_bg)
 
 # Dependent IBS (BG with uncertainty weighting; default)
-t0 = time.time()
 ibs_dep_bg_uw = dep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=True)
-print("Dependent IBS (BG+UW):", ibs_dep_bg_uw, "time:", time.time() - t0)
+print("Dependent IBS (BG+UW):", ibs_dep_bg_uw)
 ```
-
-## Notes
-num_points controls the number of evaluation time points used for numerical integration.
+num_points controls the number of evaluation time points used for numerical integration. <br>
 uncertainty_weighting=True applies additional down-/up-weighting of imputed censored observations.
 
-```md
-## Citation
-
+Citation
+--------
 If you find this paper useful in your work, please consider citing it:
-
-```bibtex
+ 
+```
 @article{lillelund_overcoming_2025,
-  title={Overcoming Dependent Censoring in the Evaluation of Survival Models},
+  title={Overcoming Dependent Censoring in the Evaluation of Survival Models}, 
   author={Christian Marius Lillelund and Shi-ang Qi and Russell Greiner},
   journal={preprint, arXiv:2502.19460},
-  year={2025}
+  year={2025},
 }
+```
