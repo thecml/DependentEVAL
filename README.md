@@ -4,13 +4,12 @@ Code for "Overcoming Dependent Censoring in the Evaluation of Survival Models (2
 
 Preprint: https://arxiv.org/abs/2502.19460 **(Under review)**
 
-## Usage: Dependent Integrated Brier Score (IBS)
+## Usage
 
 `DependentEvaluator` computes a dependent-censoring-aware Integrated Brier Score (IBS).  
 
 ```python
-import time
-from dependenteval import DependentEvaluator  # adjust import path if needed
+from src.evaluator import DependentEvaluator  # adjust import path if needed
 
 # survival_outputs: array of predicted survival curves, shape (n_test, n_time_bins)
 # time_coordinates: array of time coordinates for the survival curves, shape (n_time_bins,)
