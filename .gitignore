@@ -12,12 +12,6 @@ __pycache__/
 # Data
 data/
 
-# Plots
-plots/
-
-# Results
-results/
-
 # Distribution / packaging
 .Python
 build/
