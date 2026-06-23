@@ -4,7 +4,7 @@ Code for "Overcoming Dependent Censoring in the Evaluation of Survival Models (2
 
 Preprint: https://arxiv.org/abs/2502.19460
 
-**Accepted to UAI 2026!**
+**Accepted to UAI 2026**
 
 This repository accompanies our introduction of the **dependent Brier score and integrated dependent Brier score (IBS-Dep)**, a survival-model evaluation metric designed for settings with dependent censoring. The method models the joint distribution of event and censoring times and uses the Copula-Graphic estimator to impute marginal event times for censored instances. The repository contains the implementation and experiments supporting our theoretical analysis of the CG-based margin-time estimator and our semi-synthetic evaluation of how well IBS-Dep approximates the oracle IBS based on uncensored event times.
 
