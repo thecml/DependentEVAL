@@ -122,6 +122,19 @@ class CopulaGraphicWrapper():
         self.cg_estimator = CopulaGraphic(
             event_times, event_indicators, alpha=alpha, type=copula_name
         )
+        self.copula_name = copula_name
+        self.alpha = alpha
+        
+        event_indicators = np.asarray(event_indicators).astype(bool)
+        
+        self.cg_estimator = CopulaGraphic(
+            event_times, event_indicators, alpha=alpha, type=copula_name
+        )
+
+        # Estimate censoring marginal by treating censoring as the event.
+        self.cg_censor_estimator = CopulaGraphic(
+            event_times, ~event_indicators, alpha=alpha, type=copula_name
+        )
         
         index = np.lexsort((event_indicators, event_times))
         unique_times = np.unique(event_times[index], return_counts=True)
@@ -177,4 +190,129 @@ class CopulaGraphicWrapper():
         censor_area[~beyond_idx] += self.area[censor_indexes[~beyond_idx]]
         return censor_times + censor_area / surv_prob
         
-        
+    def conditional_survival_after_censoring(
+        self,
+        censor_times: np.ndarray,
+        target_times: np.ndarray,
+        eps: float = 1e-12,
+    ) -> np.ndarray:
+        """
+        Marginal conditional status probability:
+            q(t | c) = P(E > t | E > c)
+
+        For t <= c:
+            q(t | c) = 1
+
+        For t > c:
+            q(t | c) = S_E(t) / S_E(c)
+        """
+        censor_times = np.asarray(censor_times, dtype=float)
+        target_times = np.asarray(target_times, dtype=float)
+
+        S_t = self.predict(target_times)  # shape (n_times,)
+        S_c = self.predict(censor_times)  # shape (n_censored,)
+
+        q = np.ones((len(censor_times), len(target_times)), dtype=float)
+
+        for i, c in enumerate(censor_times):
+            after = target_times > c
+            denom = max(S_c[i], eps)
+            q[i, after] = S_t[after] / denom
+
+        return np.clip(q, 0.0, 1.0)
+    
+    def _copula_partial_v(self, u, v, eps=1e-12):
+        """
+        Compute dC(u, v) / dv for Clayton, Gumbel, Frank copulas.
+        u = F_T(t)
+        v = F_C(c)
+        """
+        u = np.clip(u, eps, 1.0 - eps)
+        v = np.clip(v, eps, 1.0 - eps)
+
+        alpha = max(float(self.alpha), eps)
+        copula_name = self.copula_name.lower()
+
+        if copula_name == "clayton":
+            A = u ** (-alpha) + v ** (-alpha) - 1.0
+            return A ** (-1.0 / alpha - 1.0) * v ** (-alpha - 1.0)
+
+        elif copula_name == "gumbel":
+            # Your CG code uses alpha + 1 as the Gumbel parameter.
+            theta = alpha + 1.0
+            log_u = -np.log(u)
+            log_v = -np.log(v)
+            A = log_u ** theta + log_v ** theta
+            C = np.exp(-(A ** (1.0 / theta)))
+            return C * (A ** (1.0 / theta - 1.0)) * (log_v ** (theta - 1.0)) / v
+
+        elif copula_name == "frank":
+            num = np.exp(-alpha * v) * (np.exp(-alpha * u) - 1.0)
+            den = (np.exp(-alpha) - 1.0) + (
+                np.exp(-alpha * u) - 1.0
+            ) * (
+                np.exp(-alpha * v) - 1.0
+            )
+            return num / den
+
+        else:
+            raise ValueError(
+                f"Unknown copula type: {self.copula_name}. "
+                "Supported: 'clayton', 'gumbel', 'frank'."
+            )
+            
+    def conditional_survival_after_censoring_copula(
+        self,
+        censor_times: np.ndarray,
+        target_times: np.ndarray,
+        eps: float = 1e-12,
+    ) -> np.ndarray:
+        """
+        Copula-correct conditional status probability:
+
+            q(t | c) = P(T > t | C = c, T > c)
+
+        For t <= c:
+            q(t | c) = 1
+
+        For t > c:
+            q(t | c) =
+                [1 - F_{T | C=c}(t)] / [1 - F_{T | C=c}(c)]
+
+        where
+
+            F_{T | C=c}(t) = dC(F_T(t), F_C(c)) / dF_C(c)
+
+        This keeps posterior uncertainty over the censored event time.
+        """
+        censor_times = np.asarray(censor_times, dtype=float)
+        target_times = np.asarray(target_times, dtype=float)
+
+        S_T_t = self.predict(target_times)
+        F_T_t = 1.0 - S_T_t
+
+        S_T_c = self.predict(censor_times)
+        F_T_c = 1.0 - S_T_c
+
+        S_C_c = self.cg_censor_estimator.predict(censor_times)
+        F_C_c = 1.0 - S_C_c
+
+        q = np.ones((len(censor_times), len(target_times)), dtype=float)
+
+        for i, c in enumerate(censor_times):
+            after = target_times > c
+            if not np.any(after):
+                continue
+
+            v_c = F_C_c[i]
+            u_c = F_T_c[i]
+
+            F_T_given_C_at_c = self._copula_partial_v(u_c, v_c, eps=eps)
+            denom = max(1.0 - F_T_given_C_at_c, eps)
+
+            u_t = F_T_t[after]
+            F_T_given_C_at_t = self._copula_partial_v(u_t, v_c, eps=eps)
+
+            q[i, after] = (1.0 - F_T_given_C_at_t) / denom
+
+        return np.clip(q, 0.0, 1.0)

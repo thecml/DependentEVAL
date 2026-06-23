@@ -136,7 +136,7 @@ def train_copula_model(model1, model2, train_data, val_data,
                 theta_stop_itr = 0
                 last_theta = theta_val
 
-        # --- Combined early stopping ---
+        # Combined early stopping
         if epoch >= min_epochs and theta_stop_itr >= theta_patience and val_stop_itr >= val_patience:
             print(f"Stopping early at epoch {epoch}: θ converged ({theta_val:.4f}) "
                   f"and validation loss not improving.")

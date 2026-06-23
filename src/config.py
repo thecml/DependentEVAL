@@ -56,3 +56,8 @@ MTLR_PARAMS = {
     'early_stop': True,
     'patience': 10
 }
+
+WEIBULL_AFT_PARAMS = {
+    'penalizer': 0,
+    'l1_ratio' :0
+}

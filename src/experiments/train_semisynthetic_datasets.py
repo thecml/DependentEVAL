@@ -7,7 +7,7 @@ from data_loader import get_data_loader
 import pandas as pd
 import numpy as np
 import config as cfg
-from evaluator import DependentEvaluator
+from evaluators import DependentEvaluator, IndependentEvaluator
 from sota.deepsurv import DeepSurv, make_deepsurv_prediction, train_deepsurv_model
 from sota.mtlr import make_mtlr_prediction, mtlr, train_mtlr_model
 from sota.sksurv import make_cox_model, make_gbsa_model, make_rsf_model, make_weibull_aft_model
@@ -222,7 +222,7 @@ if __name__ == "__main__":
     model_results = pd.DataFrame(columns=[
         "Seed", "ModelName", "Dataset", "Strategy",
         "BestCopulaName", "BestCopulaTheta",
-        "IBSTrue", "IBSUncensored", "IBSIPCW",
+        "IBSTrue", "IBSUncensored", "IBSIPCW", "IBSIPCW_CoxPH",
         "IBSIndepBG", "IBSIndepBGUW", "IBSDepBG", "IBSDepBGUW",
     ])
     
@@ -230,7 +230,7 @@ if __name__ == "__main__":
     runtime_log = pd.DataFrame(columns=[
         "Seed", "ModelName", "Dataset", "Strategy",
         "CopulaRuntime", "CopulaMemoryUsed",
-        "IBSUncensTime", "IBSIPCWTime", "IBSIndepBGTime",
+        "IBSUncensTime", "IBSIPCWTime", "IBSIPCW_CoxPHTime", "IBSIndepBGTime",
         "IBSIndepBGUWTime", "IBSDepBGTime", "IBSDepBGUWTime",
     ])
     
@@ -342,18 +342,33 @@ if __name__ == "__main__":
         ibs_ipcw = original_evaluator.integrated_brier_score(num_points=10)
         ibs_ipcw_end_time = time.time()
         ibs_ipcw_time = ibs_ipcw_end_time - ibs_ipcw_start_time
+
+        # CoxPH-IPCW IBS under conditionally independent censoring.
+        # This uses G_hat(t | X) instead of the marginal KM censoring curve.
+        independent_evaluator = IndependentEvaluator(
+            survival_outputs, time_bins,
+            data_test.time.values, data_test.event.values,
+            data_train.time.values, data_train.event.values,
+            train_features=X_train,
+            test_features=X_test,
+            censor_penalizer=0.01,
+        )
+        ibs_ipcw_coxph_start_time = time.time()
+        ibs_ipcw_coxph = independent_evaluator.integrated_brier_score(num_points=10)
+        ibs_ipcw_coxph_end_time = time.time()
+        ibs_ipcw_coxph_time = ibs_ipcw_coxph_end_time - ibs_ipcw_coxph_start_time
         
         # Calculate independent metrics CI/IBS/MAE
         indep_evaluator = DependentEvaluator(survival_outputs, time_bins, data_test.time.values, data_test.event.values,
                                              data_train.time.values, data_train.event.values, copula_name="clayton", alpha=0)
         
         ibs_indep_bg_start_time = time.time()
-        ibs_indep_bg = indep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=False)
+        ibs_indep_bg = indep_evaluator.integrated_brier_score(method="BG", num_points=10)
         ibs_indep_bg_end_time = time.time()
         ibs_indep_bg_time = ibs_indep_bg_end_time - ibs_indep_bg_start_time
 
         ibs_indep_bguw_start_time = time.time()
-        ibs_indep_bguw = indep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=True)
+        ibs_indep_bguw = indep_evaluator.integrated_brier_score(method="BG_UW", num_points=10)
         ibs_indep_bguw_end_time = time.time()
         ibs_indep_bguw_time = ibs_indep_bguw_end_time - ibs_indep_bguw_start_time
 
@@ -363,12 +378,12 @@ if __name__ == "__main__":
                                            alpha=best_copula_theta)
             
         ibs_dep_bg_start_time = time.time()
-        ibs_dep_bg = dep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=False)
+        ibs_dep_bg = dep_evaluator.integrated_brier_score(method="BG", num_points=10)
         ibs_dep_bg_end_time = time.time()
         ibs_dep_bg_time = ibs_dep_bg_end_time - ibs_dep_bg_start_time
 
         ibs_dep_bguw_start_time = time.time()
-        ibs_dep_bguw = dep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=True)
+        ibs_dep_bguw = dep_evaluator.integrated_brier_score(method="BG_UW", num_points=10)
         ibs_dep_bguw_end_time = time.time()
         ibs_dep_bguw_time = ibs_dep_bguw_end_time - ibs_dep_bguw_start_time
         
@@ -376,7 +391,7 @@ if __name__ == "__main__":
         result_row = pd.Series([
             seed, model_name, dataset_name, strategy,
             best_copula_name, best_copula_theta,
-            ibs_true, ibs_uncens, ibs_ipcw,
+            ibs_true, ibs_uncens, ibs_ipcw, ibs_ipcw_coxph,
             ibs_indep_bg, ibs_indep_bguw, ibs_dep_bg, ibs_dep_bguw,
         ], index=model_results.columns)
         model_results = pd.concat(
@@ -388,7 +403,7 @@ if __name__ == "__main__":
         runtime_row = pd.Series([
             seed, model_name, dataset_name, strategy,
             copula_runtime, copula_memory_used,
-            ibs_uncens_time, ibs_ipcw_time, ibs_indep_bg_time,
+            ibs_uncens_time, ibs_ipcw_time, ibs_ipcw_coxph_time, ibs_indep_bg_time,
             ibs_indep_bguw_time, ibs_dep_bg_time, ibs_dep_bguw_time,
         ], index=runtime_log.columns)
 

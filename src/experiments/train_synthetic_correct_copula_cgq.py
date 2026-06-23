@@ -1,3 +1,10 @@
+"""Synthetic dependent-censoring experiment comparing BG_UW against CG_Q.
+
+Fixed-event/fixed-model version: event times, train/test split, oracle-fitted
+Cox model, predictions, and oracle IBS are fixed within each Monte Carlo seed.
+Changing tau only changes the censoring mechanism.
+"""
+
 import os
 import random
 
@@ -25,10 +32,10 @@ torch.set_default_dtype(dtype)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 data_cfg = {
-    "alpha_e1": 19,
-    "alpha_e2": 17,
-    "gamma_e1": 6,
-    "gamma_e2": 4,
+    "alpha_e1": 19,  # censor alpha base
+    "alpha_e2": 17,  # event alpha
+    "gamma_e1": 6,   # censor gamma
+    "gamma_e2": 4,   # event gamma
     "n_samples": 10000,
     "n_features": 10,
 }
@@ -52,9 +59,8 @@ def make_event_uniforms(*, seed: int, n: int, device, dtype):
     """
     Fixed event uniforms per seed.
 
-    These are reused across all copula families and all true Kendall tau values.
-    Consequently, the realized event times and oracle IBS target are kept much
-    more stable when varying dependence strength.
+    These are reused across all copula families and all Kendall tau values.
+    Hence changing tau changes only the censoring mechanism, not event times.
     """
     rng = np.random.default_rng(int(seed) + 123_456_789)
     v_np = rng.uniform(0.0, 1.0, int(n))
@@ -74,13 +80,8 @@ def sample_censor_uniform_given_event_uniform(
     """
     Sample censoring uniforms U conditional on fixed event uniforms V.
 
-    This is the core redesign: V is fixed across tau, while U changes with the
-    copula dependence. The resulting event times are fixed across tau, and only
-    censoring becomes more/less dependent on those event times.
-
-    Variables are the uniforms passed to DGP_Weibull_linear.rvs. In this codebase
-    rvs(x, u) uses the survival-uniform inverse t = F^{-1}(u | x) in the sense
-    S(t | x)=u, but the copula construction only needs them to be Uniform(0,1).
+    V is fixed across tau; U changes with the copula dependence. This isolates
+    the effect of event--censor dependence while keeping event times fixed.
     """
     copula_name = str(copula_name)
     k_tau = float(k_tau)
@@ -106,8 +107,8 @@ def sample_censor_uniform_given_event_uniform(
     elif copula_name == "clayton":
         theta = float(kendall_tau_to_theta("clayton", k_tau))
         theta = max(theta, 1e-12)
-        # w = dC(u,v)/dv = v^(-theta-1) * A^(-1/theta-1)
-        # A = u^(-theta) + v^(-theta) - 1
+        # w = dC(u,v)/dv = v^(-theta-1) * A^(-1/theta-1),
+        # A = u^(-theta) + v^(-theta) - 1. Solve for u.
         A = (w * (v ** (theta + 1.0))) ** (-theta / (1.0 + theta))
         u_neg_theta = A - (v ** (-theta)) + 1.0
         u_neg_theta = np.maximum(u_neg_theta, 1e-12)
@@ -117,8 +118,6 @@ def sample_censor_uniform_given_event_uniform(
         theta = float(kendall_tau_to_theta("frank", k_tau))
         theta = max(theta, 1e-12)
         # For Frank, solve w = dC(u,v)/dv for a = exp(-theta*u).
-        # Let b=exp(-theta*v), d=exp(-theta)-1, y=a-1:
-        # w = b*y / (d + y*(b-1)) => y = w*d / (b - w*(b-1)).
         b = np.exp(-theta * v)
         d = np.exp(-theta) - 1.0
         denom = b - w * (b - 1.0)
@@ -134,9 +133,9 @@ def sample_censor_uniform_given_event_uniform(
     return torch.from_numpy(u).to(device=device, dtype=dtype)
 
 
-def make_dep_censor_df_for_setting(*, X, dgp_event, dgp_cens, u_censor, v_event):
-    t_c = dgp_cens.rvs(X, u_censor)  # numpy
-    t_e = dgp_event.rvs(X, v_event)  # numpy; fixed across tau for a seed
+def make_observed_df(*, X, true_event_time, dgp_cens, u_censor):
+    t_c = dgp_cens.rvs(X, u_censor)
+    t_e = np.asarray(true_event_time, dtype=float)
 
     T = np.minimum(t_e, t_c)
     E = (t_e < t_c).astype(int)
@@ -149,43 +148,6 @@ def make_dep_censor_df_for_setting(*, X, dgp_event, dgp_cens, u_censor, v_event)
     df["true_censor"] = np.where(t_c <= 0, 1.0, t_c)
     df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["time", "true_time"]).reset_index(drop=True)
     return df
-
-
-def assumed_settings_for_experiment(
-    *,
-    exp: str,
-    dgp_copula: str,
-    dgp_tau: float,
-    dep_true_tau: float,
-    dep_assumed_taus: list[float],
-):
-    exp = str(exp)
-    dgp_copula = str(dgp_copula)
-    dgp_tau = float(dgp_tau)
-
-    if exp == "family":
-        if dgp_copula == "clayton":
-            return [("frank", dgp_tau)]
-        if dgp_copula == "frank":
-            return [("clayton", dgp_tau)]
-        return []
-
-    if exp == "dep_clayton":
-        if dgp_copula == "clayton" and np.isclose(dgp_tau, float(dep_true_tau)):
-            return [("clayton", float(tau_assumed)) for tau_assumed in dep_assumed_taus]
-        return []
-
-    if exp == "dep_frank":
-        if dgp_copula == "frank" and np.isclose(dgp_tau, float(dep_true_tau)):
-            return [("frank", float(tau_assumed)) for tau_assumed in dep_assumed_taus]
-        return []
-
-    if exp == "gaussian":
-        if dgp_copula == "gaussian":
-            return [("clayton", dgp_tau), ("frank", dgp_tau)]
-        return []
-
-    raise ValueError(exp)
 
 
 def calibrate_alpha_c_mults_by_tau(
@@ -206,7 +168,8 @@ def calibrate_alpha_c_mults_by_tau(
 
     Returns:
       chosen[(seed, copula, k_tau)] = best_mult
-      calib_df = all calibration rows
+      calib_df = aggregated calibration summary
+      selected_calib_df = chosen row per seed/copula/tau
     """
     assert linear, "Nonlinear version not implemented here."
 
@@ -236,7 +199,7 @@ def calibrate_alpha_c_mults_by_tau(
         )
 
         v_event = make_event_uniforms(seed=int(seed), n=n_samples, device=device, dtype=dtype)
-        t_e = dgp_event.rvs(X, v_event)
+        true_event_time = dgp_event.rvs(X, v_event)
 
         for copula_name in copula_names:
             for k_tau in k_taus:
@@ -256,7 +219,7 @@ def calibrate_alpha_c_mults_by_tau(
                         device=device, dtype=dtype, coeff=beta_cens,
                     )
                     t_c = dgp_cens.rvs(X, u_censor)
-                    E = (t_e < t_c).astype(np.float64)
+                    E = (true_event_time < t_c).astype(np.float64)
                     censoring_rate = float(1.0 - E.mean())
 
                     rows.append({
@@ -274,14 +237,14 @@ def calibrate_alpha_c_mults_by_tau(
 
     calib_df = (
         calib.groupby(["copula_name", "k_tau", "alpha_c_mult"], as_index=False)
-        .agg(
-            censor_rate_mean=("censoring_rate", "mean"),
-            censor_rate_std=("censoring_rate", "std"),
-            abs_err_mean=("abs_err_to_target", "mean"),
-            alpha_c_used_mean=("alpha_c_used", "mean"),
-        )
-        .sort_values(["copula_name", "k_tau", "abs_err_mean", "alpha_c_mult"])
-        .reset_index(drop=True)
+             .agg(
+                 censor_rate_mean=("censoring_rate", "mean"),
+                 censor_rate_std=("censoring_rate", "std"),
+                 abs_err_mean=("abs_err_to_target", "mean"),
+                 alpha_c_used_mean=("alpha_c_used", "mean"),
+             )
+             .sort_values(["copula_name", "k_tau", "abs_err_mean", "alpha_c_mult"])
+             .reset_index(drop=True)
     )
 
     chosen = {}
@@ -299,35 +262,69 @@ def calibrate_alpha_c_mults_by_tau(
                         f"Missing calibration rows for seed={seed}, copula={copula_name}, tau={k_tau}"
                     )
                 best_row = sub.sort_values(["abs_err_to_target", "alpha_c_mult"]).iloc[0]
-                best_mult = float(best_row["alpha_c_mult"])
-                chosen[(int(seed), str(copula_name), float(k_tau))] = best_mult
+                best = float(best_row["alpha_c_mult"])
+                chosen[(int(seed), str(copula_name), float(k_tau))] = best
                 selected_rows.append(best_row.to_dict())
 
     selected_calib_df = pd.DataFrame(selected_rows)
     return chosen, calib_df, selected_calib_df
 
-def run_wrong_copula_experiment(
+
+def fit_oracle_cox_and_predict(*, X, true_event_time, train_idx, test_idx, features, dtype, device, num_points):
+    """Fit one Cox model per seed on oracle uncensored training event times."""
+    df_oracle = pd.DataFrame(X.detach().cpu().numpy(), columns=features)
+    df_oracle["true_time"] = np.where(np.asarray(true_event_time) <= 0, 1.0, true_event_time)
+    df_oracle["event"] = np.ones(df_oracle.shape[0], dtype=int)
+
+    df_train = df_oracle.iloc[train_idx].copy()
+    df_test = df_oracle.iloc[test_idx].copy()
+
+    y_train_oracle = convert_to_structured(df_train["true_time"], df_train["event"])
+
+    config = dotdict(cfg.COXPH_PARAMS)
+    model = make_cox_model(config)
+    model.fit(df_train[features], y_train_oracle)
+
+    time_bins = make_time_bins(df_train["true_time"].values, event=None, dtype=dtype).to(device)
+    time_bins = torch.cat((torch.tensor([0.0], device=device, dtype=dtype), time_bins)).cpu().numpy()
+    t_star = np.quantile(df_test["true_time"].values, 0.9)
+    time_bins = time_bins[time_bins <= t_star]
+
+    surv_fns = model.predict_survival_function(df_test[features])
+    surv = np.row_stack([fn(model.unique_times_) for fn in surv_fns])
+
+    spline = interp1d(
+        model.unique_times_, surv, kind="linear",
+        bounds_error=False,
+        fill_value=(1.0, surv[:, -1]),
+    )
+    S = np.clip(spline(time_bins), 0.0, 1.0)
+    surv_on_grid = pd.DataFrame(S, columns=time_bins)
+    surv_on_grid[0.0] = 1.0
+
+    true_test_time = df_test["true_time"].values
+    true_test_event = np.ones(df_test.shape[0], dtype=int)
+    true_eval = SurvivalEvaluator(surv_on_grid, time_bins, true_test_time, true_test_event)
+    ibs_true = float(true_eval.integrated_brier_score(IPCW_weighted=False, num_points=num_points))
+
+    return surv_on_grid, time_bins, ibs_true
+
+
+def run_bguw_vs_cgq_experiment(
     *,
     data_cfg,
     seeds,
-    dgp_copulas,
+    copula_names,
     k_taus,
     alpha_c_mult_by_setting,
-    experiments,
-    dep_true_tau,
-    dep_assumed_taus,
     device,
     dtype,
     train_frac=0.7,
     split_seed=0,
     num_points=10,
+    linear=True,
+    hidden_dim=32,
 ):
-    """Run misspecification experiment with fixed event times and fixed model predictions.
-
-    For each seed, event times and the prediction model are fixed once. Only the
-    observed censoring process changes with the DGP copula/tau. This isolates
-    evaluation-metric behavior from changes in the fitted survival model.
-    """
     rows = []
 
     n_samples = int(data_cfg["n_samples"])
@@ -343,66 +340,39 @@ def run_wrong_copula_experiment(
 
     for seed in seeds:
         _set_global_seeds(int(seed))
+
         g = torch.Generator(device=device)
         g.manual_seed(int(seed))
 
         X = torch.rand((n_samples, n_features), generator=g, device=device, dtype=dtype)
-        beta_event = 2 * torch.rand((n_features,), generator=g, device=device, dtype=dtype) - 1
-        beta_cens = 2 * torch.rand((n_features,), generator=g, device=device, dtype=dtype) - 1
 
-        dgp_event = DGP_Weibull_linear(
-            n_features, alpha_e, gamma_e, use_x=True,
-            device=device, dtype=dtype, coeff=beta_event,
-        )
+        if linear:
+            beta_event = 2 * torch.rand((n_features,), generator=g, device=device, dtype=dtype) - 1
+            beta_cens = 2 * torch.rand((n_features,), generator=g, device=device, dtype=dtype) - 1
+            dgp_event = DGP_Weibull_linear(
+                n_features, alpha_e, gamma_e, use_x=True,
+                device=device, dtype=dtype, coeff=beta_event,
+            )
+        else:
+            raise NotImplementedError("Add the nonlinear version later.")
 
-        # Fixed event uniforms and true event times for this seed.
         v_event = make_event_uniforms(seed=int(seed), n=n_samples, device=device, dtype=dtype)
         true_event_time = dgp_event.rvs(X, v_event)
-        true_event_time = np.where(true_event_time <= 0, 1.0, true_event_time)
 
-        X_np = X.detach().cpu().numpy()
-        X_df = pd.DataFrame(X_np, columns=features)
-
-        X_train_fixed = X_df.iloc[train_idx].copy()
-        X_test_fixed = X_df.iloc[test_idx].copy()
-        true_train_time = true_event_time[train_idx]
-        true_test_time = true_event_time[test_idx]
-        true_train_event = np.ones(len(train_idx), dtype=int)
-        true_test_event = np.ones(len(test_idx), dtype=int)
-
-        # Fixed prediction model: fit once per seed on uncensored/oracle event times.
-        y_train_oracle = convert_to_structured(true_train_time, true_train_event)
-
-        time_bins = make_time_bins(true_train_time, event=None, dtype=dtype).to(device)
-        time_bins = torch.cat((torch.tensor([0.0], device=device, dtype=dtype), time_bins)).cpu().numpy()
-        t_star = np.quantile(true_test_time, 0.9)
-        time_bins = time_bins[time_bins <= t_star]
-
-        config = dotdict(cfg.COXPH_PARAMS)
-        model = make_cox_model(config)
-        model.fit(X_train_fixed, y_train_oracle)
-
-        surv_fns = model.predict_survival_function(X_test_fixed)
-        surv = np.row_stack([fn(model.unique_times_) for fn in surv_fns])
-
-        spline = interp1d(
-            model.unique_times_, surv, kind="linear",
-            bounds_error=False,
-            fill_value=(1.0, surv[:, -1]),
+        surv_on_grid, time_bins, ibs_true = fit_oracle_cox_and_predict(
+            X=X,
+            true_event_time=true_event_time,
+            train_idx=train_idx,
+            test_idx=test_idx,
+            features=features,
+            dtype=dtype,
+            device=device,
+            num_points=num_points,
         )
-        S = np.clip(spline(time_bins), 0.0, 1.0)
-        surv_on_grid = pd.DataFrame(S, columns=time_bins)
-        surv_on_grid[0.0] = 1.0
 
-        true_eval = SurvivalEvaluator(surv_on_grid, time_bins, true_test_time, true_test_event)
-        ibs_true = float(true_eval.integrated_brier_score(IPCW_weighted=False, num_points=num_points))
-
-        for dgp_copula in dgp_copulas:
+        for copula_name in copula_names:
             for k_tau in k_taus:
-                dgp_copula = str(dgp_copula)
-                k_tau = float(k_tau)
-
-                mult = float(alpha_c_mult_by_setting[(int(seed), dgp_copula, k_tau)])
+                mult = float(alpha_c_mult_by_setting[(int(seed), str(copula_name), float(k_tau))])
                 alpha_c = alpha_c_base * mult
 
                 dgp_cens = DGP_Weibull_linear(
@@ -411,88 +381,76 @@ def run_wrong_copula_experiment(
                 )
 
                 u_censor = sample_censor_uniform_given_event_uniform(
-                    copula_name=dgp_copula,
-                    k_tau=k_tau,
+                    copula_name=str(copula_name),
+                    k_tau=float(k_tau),
                     seed=int(seed),
                     event_v=v_event,
                     device=device,
                     dtype=dtype,
                 )
 
-                censor_time = dgp_cens.rvs(X, u_censor)
-                censor_time = np.where(censor_time <= 0, 1.0, censor_time)
-                observed_time = np.minimum(true_event_time, censor_time)
-                observed_event = (true_event_time < censor_time).astype(int)
+                df = make_observed_df(X=X, true_event_time=true_event_time, dgp_cens=dgp_cens, u_censor=u_censor)
+                if len(df) != n_samples:
+                    raise RuntimeError(
+                        f"Unexpected row drop after simulation: len(df)={len(df)} != n_samples={n_samples}. "
+                        "This would break the fixed train/test split."
+                    )
 
-                censoring_rate = float(1.0 - observed_event.mean())
+                df_train = df.iloc[train_idx].copy()
+                df_test = df.iloc[test_idx].copy()
 
-                train_time = observed_time[train_idx]
-                train_event = observed_event[train_idx]
-                test_time = observed_time[test_idx]
-                test_event = observed_event[test_idx]
+                censoring_rate = float(1.0 - df["event"].mean())
 
                 ipcw_eval = SurvivalEvaluator(
                     surv_on_grid, time_bins,
-                    test_time, test_event,
-                    train_time, train_event,
+                    df_test["time"].values, df_test["event"].values,
+                    df_train["time"].values, df_train["event"].values,
                 )
                 ibs_ipcw = float(ipcw_eval.integrated_brier_score(num_points=num_points))
 
-                for exp in experiments:
-                    assumed_settings = assumed_settings_for_experiment(
-                        exp=exp,
-                        dgp_copula=dgp_copula,
-                        dgp_tau=k_tau,
-                        dep_true_tau=dep_true_tau,
-                        dep_assumed_taus=dep_assumed_taus,
-                    )
+                theta = kendall_tau_to_theta(str(copula_name), float(k_tau))
+                dep_eval = DependentEvaluator(
+                    surv_on_grid, time_bins,
+                    df_test["time"].values, df_test["event"].values,
+                    df_train["time"].values, df_train["event"].values,
+                    copula_name=str(copula_name), alpha=theta,
+                )
+                ibs_dep_bguw = float(dep_eval.integrated_brier_score(method="BG_UW", num_points=num_points))
+                ibs_dep_cgq = float(dep_eval.integrated_brier_score(method="CG_Q", num_points=num_points))
 
-                    for assumed_copula, assumed_tau in assumed_settings:
-                        theta = kendall_tau_to_theta(str(assumed_copula), float(assumed_tau))
+                bias_ipcw = ibs_ipcw - ibs_true
+                bias_dep_bguw = ibs_dep_bguw - ibs_true
+                bias_dep_cgq = ibs_dep_cgq - ibs_true
 
-                        dep_eval = DependentEvaluator(
-                            surv_on_grid, time_bins,
-                            test_time, test_event,
-                            train_time, train_event,
-                            copula_name=str(assumed_copula),
-                            alpha=theta,
-                        )
-                        ibs_dep_bguw = float(dep_eval.integrated_brier_score(method="BG_UW", num_points=num_points))
-
-                        rows.append({
-                            "prediction_model": "oracle_fixed_per_seed",
-                            "experiment": str(exp),
-                            "seed": int(seed),
-                            "dgp_copula": str(dgp_copula),
-                            "true_k_tau": float(k_tau),
-                            "assumed_copula": str(assumed_copula),
-                            "assumed_k_tau": float(assumed_tau),
-                            "tau_abs_error": abs(float(k_tau) - float(assumed_tau)),
-                            "alpha_c_mult": float(mult),
-                            "alpha_c_used": float(alpha_c),
-                            "censoring_rate": float(censoring_rate),
-                            "ibs_true": ibs_true,
-                            "ibs_ipcw": ibs_ipcw,
-                            "ibs_dep_bguw": ibs_dep_bguw,
-                            "bias_ipcw": ibs_ipcw - ibs_true,
-                            "bias_dep_bguw": ibs_dep_bguw - ibs_true,
-                            "err_ipcw": abs(ibs_true - ibs_ipcw),
-                            "err_dep_bguw": abs(ibs_true - ibs_dep_bguw),
-                        })
+                rows.append({
+                    "prediction_model": "oracle_fixed_per_seed",
+                    "seed": int(seed),
+                    "copula_name": str(copula_name),
+                    "k_tau": float(k_tau),
+                    "alpha_c_mult": float(mult),
+                    "alpha_c_used": float(alpha_c),
+                    "censoring_rate": float(censoring_rate),
+                    "ibs_true": ibs_true,
+                    "ibs_ipcw": ibs_ipcw,
+                    "ibs_dep_bguw": ibs_dep_bguw,
+                    "ibs_dep_cgq": ibs_dep_cgq,
+                    "bias_ipcw": bias_ipcw,
+                    "bias_dep_bguw": bias_dep_bguw,
+                    "bias_dep_cgq": bias_dep_cgq,
+                    "err_ipcw": abs(bias_ipcw),
+                    "err_dep_bguw": abs(bias_dep_bguw),
+                    "err_dep_cgq": abs(bias_dep_cgq),
+                    "delta_err_cgq_minus_bguw": abs(bias_dep_cgq) - abs(bias_dep_bguw),
+                })
 
     return pd.DataFrame(rows)
+
+
 if __name__ == "__main__":
     SEEDS = list(range(0, 10))
     PILOT_SEEDS = list(range(0, 10))
-    COPULA_NAMES = ["clayton", "frank", "gaussian"]
-    K_TAU = [0.0, 0.25, 0.5, 0.8]
-
-    DEP_TRUE_TAU = 0.5
-    DEP_ASSUMED_TAUS = K_TAU
-
-    DGP_COPULAS = ["clayton", "frank", "gaussian"]
-    experiments = ["family", "dep_clayton", "dep_frank", "gaussian"]
-
+    COPULA_NAMES = ["clayton", "frank"]
+    K_TAU = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
     TARGET_CENSOR = 0.50
 
     mult_grid = np.concatenate([
@@ -513,59 +471,47 @@ if __name__ == "__main__":
         linear=True,
     )
 
-    print("Using fixed event uniforms and seed-specific censoring calibration.")
+    print("Seed-specific censoring calibration summary:")
     print(
         selected_calib_df.groupby(["copula_name", "k_tau"], as_index=False)
         .agg(
-            alpha_c_mult_mean=("alpha_c_mult", "mean"),
-            alpha_c_mult_std=("alpha_c_mult", "std"),
-            censoring_rate_mean=("censoring_rate", "mean"),
-            censoring_rate_std=("censoring_rate", "std"),
+            censor_rate_mean=("censoring_rate", "mean"),
+            censor_rate_std=("censoring_rate", "std"),
+            abs_err_mean=("abs_err_to_target", "mean"),
+            alpha_c_mult_min=("alpha_c_mult", "min"),
+            alpha_c_mult_max=("alpha_c_mult", "max"),
         )
         .to_string(index=False)
     )
 
-    results_df = run_wrong_copula_experiment(
+    results_df = run_bguw_vs_cgq_experiment(
         data_cfg=data_cfg,
         seeds=SEEDS,
-        dgp_copulas=DGP_COPULAS,
+        copula_names=COPULA_NAMES,
         k_taus=K_TAU,
         alpha_c_mult_by_setting=alpha_c_mult_by_setting,
-        experiments=experiments,
-        dep_true_tau=DEP_TRUE_TAU,
-        dep_assumed_taus=DEP_ASSUMED_TAUS,
         device=device,
         dtype=dtype,
         train_frac=0.7,
         split_seed=0,
         num_points=10,
+        linear=True,
     )
 
     print("Actual censoring rates in generated results:")
     print(
-        results_df.groupby(["dgp_copula", "true_k_tau"], as_index=False)
+        results_df.groupby(["copula_name", "k_tau"], as_index=False)
         .agg(
             censoring_rate_mean=("censoring_rate", "mean"),
             censoring_rate_std=("censoring_rate", "std"),
             censoring_rate_min=("censoring_rate", "min"),
             censoring_rate_max=("censoring_rate", "max"),
-            ibs_true_mean=("ibs_true", "mean"),
-            ibs_true_std=("ibs_true", "std"),
+            ibs_true_min=("ibs_true", "min"),
+            ibs_true_max=("ibs_true", "max"),
         )
-        .to_string(index=False)
-    )
-
-    print("Oracle IBS stability by seed/copuIa family:")
-    print(
-        results_df.groupby(["seed", "dgp_copula"], as_index=False)
-        .agg(ibs_true_min=("ibs_true", "min"), ibs_true_max=("ibs_true", "max"))
-        .assign(ibs_true_range=lambda d: d["ibs_true_max"] - d["ibs_true_min"])
-        .groupby("dgp_copula", as_index=False)
-        .agg(mean_within_seed_range=("ibs_true_range", "mean"), max_within_seed_range=("ibs_true_range", "max"))
         .to_string(index=False)
     )
 
     os.makedirs(cfg.RESULTS_DIR, exist_ok=True)
 
-    filename = f"{cfg.RESULTS_DIR}/synthetic_results_wrong_copula.csv"
-    results_df.to_csv(filename, index=False)
+    results_df.to_csv(f"{cfg.RESULTS_DIR}/synthetic_results_bguw_vs_cgq.csv", index=False)
