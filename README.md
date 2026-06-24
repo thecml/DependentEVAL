@@ -1,5 +1,7 @@
 # DependentEVAL
 
+<img width="390" height="102" alt="UAI 2026 logo" src="https://github.com/user-attachments/assets/e6133286-0fbb-447e-a14a-ae411e9e3d80" />
+
 Code for "Overcoming Dependent Censoring in the Evaluation of Survival Models (2026)"
 
 Preprint: https://arxiv.org/abs/2502.19460
