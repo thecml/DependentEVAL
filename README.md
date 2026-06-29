@@ -164,17 +164,11 @@ The analysis and figure-generation code is available in [`notebooks/`](notebooks
 
 ## How do I use the metric?
 
-`DependentEvaluator` computes a dependent-censoring-aware Integrated Brier Score (IBS).  
+`DependentEvaluator` computes the dependent Brier score at a single time point and its integrated version.
 
 ```python
-from src.evaluator import DependentEvaluator  # adjust import path if needed
+from evaluators import DependentEvaluator
 
-# survival_outputs: array of predicted survival curves, shape (n_test, n_time_bins)
-# time_coordinates: array of time coordinates for the survival curves, shape (n_time_bins,)
-# test_event_times / test_event_indicators: test event times and indicators
-# train_event_times / train_event_indicators: train event times and indicators
-# copula_name: copula family name (eg, "clayton")
-# alpha: dependence parameter (eg, 2.0)
 dep_evaluator = DependentEvaluator(
     predicted_survival_curves=survival_outputs,
     time_coordinates=time_bins,
@@ -182,20 +176,29 @@ dep_evaluator = DependentEvaluator(
     test_event_indicators=test_events,
     train_event_times=train_times,
     train_event_indicators=train_events,
-    copula_name=copula_name,
-    alpha=alpha,
+    copula_name="clayton",
+    alpha=2.0,
 )
 
-# Dependent IBS (BG, no uncertainty weighting)
-ibs_dep_bg = dep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=False)
-print("Dependent IBS (BG):", ibs_dep_bg)
-
-# Dependent IBS (BG with uncertainty weighting; default)
-ibs_dep_bg_uw = dep_evaluator.integrated_brier_score(num_points=10, uncertainty_weighting=True)
-print("Dependent IBS (BG+UW):", ibs_dep_bg_uw)
+bs_dep = dep_evaluator.brier_score(method="BG_UW", target_time=365.0)
+ibs_dep = dep_evaluator.integrated_brier_score(method="BG_UW", num_points=10)
 ```
-num_points controls the number of evaluation time points used for numerical integration. <br>
-uncertainty_weighting=True applies additional down-/up-weighting of imputed censored observations.
+
+Supported methods are `BG`, `BG_UW`, and `CG_Q`.
+
+## Smoke test
+
+A small synthetic smoke test checks the pointwise dependent Brier score against the oracle score based on uncensored event times and verifies consistency between the single-point, multi-point, and integrated implementations:
+
+```bash
+python test_dep_brier_score.py --n-samples 2000 --copula clayton --tau 0.5 --target-censoring 0.5
+```
+
+It can also be run with pytest:
+
+```bash
+pytest -q test_dep_brier_score.py
+```
 
 Citation
 --------

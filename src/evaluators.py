@@ -110,141 +110,148 @@ class DependentEvaluator:
         predicted_times = np.array(predicted_times)
         return predicted_times
         
-    def integrated_brier_score(self, method: str, num_points: int):
+    def brier_score_multiple_points(
+        self,
+        method: str,
+        target_times: NumericArrayLike,
+    ) -> np.ndarray:
+        """Compute the dependent Brier score at one or more time points.
+
+        Parameters
+        ----------
+        method:
+            Dependent-censoring correction. Supported values are ``"BG"``
+            (copula-graphic margin-time imputation), ``"BG_UW"`` (margin-time
+            imputation with uncertainty weighting), and ``"CG_Q"``
+            (conditional event-status probabilities).
+        target_times:
+            One-dimensional array of evaluation times.
+
+        Returns
+        -------
+        np.ndarray
+            Brier score at each requested time, in the same order as
+            ``target_times``.
+        """
+        self._error_trainset("dependent Brier score")
+
+        target_times = np.asarray(check_and_convert(target_times), dtype=float)
+        if target_times.ndim == 0:
+            target_times = target_times.reshape(1)
+        if target_times.ndim != 1:
+            raise TypeError("target_times must be a one-dimensional array.")
+        if target_times.size == 0:
+            raise ValueError("target_times must contain at least one time point.")
+        if np.any(~np.isfinite(target_times)) or np.any(target_times < 0):
+            raise ValueError("target_times must contain finite, non-negative values.")
+
         predicted_curves = check_and_convert(self.predicted_curves)
         time_bins = check_and_convert(self.time_coordinates)
+        event_times = np.asarray(self.event_times, dtype=float)
+        event_indicators = np.asarray(self.event_indicators, dtype=bool)
+        train_event_times = np.asarray(self.train_event_times, dtype=float)
+        train_event_indicators = np.asarray(self.train_event_indicators, dtype=bool)
 
-        event_times = self.event_times
-        event_indicators = self.event_indicators
-        train_event_times = self.train_event_times
-        train_event_indicators = self.train_event_indicators
-        copula_name = self.copula_name
-        alpha = self.alpha
-        
-        event_indicators = self.event_indicators.astype(bool)
-        train_event_indicators = self.train_event_indicators.astype(bool)
-        
-        max_target_time = np.max(np.concatenate((event_times, train_event_times))) if train_event_times \
-                          is not None else np.max(event_times)
-            
-        time_points = np.linspace(0, max_target_time, num_points)
-        time_range = max_target_time
-        
-        predict_probs_mat = []
-        for i in range(predicted_curves.shape[0]):
-            predict_probs = predict_multi_probs_from_curve(
+        predict_probs_mat = np.array([
+            predict_multi_probs_from_curve(
                 predicted_curves[i, :],
                 time_bins,
-                time_points
-            ).tolist()
-            predict_probs_mat.append(predict_probs)
+                target_times,
+            )
+            for i in range(predicted_curves.shape[0])
+        ])
 
-        predict_probs_mat = np.array(predict_probs_mat)
+        n_samples = len(event_times)
+        n_times = len(target_times)
+        target_times_mat = np.repeat(target_times.reshape(1, -1), n_samples, axis=0)
 
         if method == "BG":
-            censored_times = event_times[event_indicators == 0]
+            censored_mask = ~event_indicators
             cg_model = CopulaGraphicWrapper(
-                train_event_times, train_event_indicators,
-                copula_name=copula_name, alpha=alpha
+                train_event_times,
+                train_event_indicators,
+                copula_name=self.copula_name,
+                alpha=self.alpha,
             )
 
-            censored_times_bg = cg_model.best_guess(censored_times)
             event_times_bg = event_times.copy()
-            event_times_bg[event_indicators == 0] = censored_times_bg
+            if np.any(censored_mask):
+                event_times_bg[censored_mask] = cg_model.best_guess(
+                    event_times[censored_mask]
+                )
 
-            event_indicators_bg = np.ones_like(event_indicators, dtype=bool)
+            event_times_mat = np.repeat(event_times_bg.reshape(-1, 1), n_times, axis=1)
+            event_before_or_at = event_times_mat <= target_times_mat
+            event_free = ~event_before_or_at
 
-            target_times_mat = np.repeat(time_points.reshape(1, -1), repeats=len(event_times), axis=0)
-            event_times_mat = np.repeat(event_times_bg.reshape(-1, 1), repeats=len(time_points), axis=1)
-            event_indicators_mat = np.repeat(event_indicators_bg.reshape(-1, 1), repeats=len(time_points), axis=1)
-
-            weight_cat1 = (event_times_mat <= target_times_mat) & event_indicators_mat
-            weight_cat2 = (event_times_mat > target_times_mat)
+            square_error_mat = (
+                np.square(predict_probs_mat) * event_before_or_at
+                + np.square(1.0 - predict_probs_mat) * event_free
+            )
 
         elif method == "BG_UW":
-
-            censored_mask = (event_indicators == 0)
+            censored_mask = ~event_indicators
             censored_times = event_times[censored_mask]
-
             cg_model = CopulaGraphicWrapper(
-                train_event_times, train_event_indicators,
-                copula_name=copula_name, alpha=alpha
+                train_event_times,
+                train_event_indicators,
+                copula_name=self.copula_name,
+                alpha=self.alpha,
             )
 
-            censored_times_bg = cg_model.best_guess(censored_times)
             event_times_bg = event_times.copy()
-            event_times_bg[censored_mask] = censored_times_bg
-            
-            target_times_mat = np.repeat(time_points.reshape(1, -1), repeats=len(event_times), axis=0)
-            event_times_mat  = np.repeat(event_times_bg.reshape(-1, 1), repeats=len(time_points), axis=1)
+            if censored_times.size > 0:
+                event_times_bg[censored_mask] = cg_model.best_guess(censored_times)
 
-            # treat imputed censored as "events"
-            event_indicators_mat = np.ones_like(event_times_mat, dtype=bool)
+            event_times_mat = np.repeat(event_times_bg.reshape(-1, 1), n_times, axis=1)
+            event_before_or_at = event_times_mat <= target_times_mat
+            event_free = ~event_before_or_at
 
-            weight_cat1 = (event_times_mat <= target_times_mat)
-            weight_cat2 = (event_times_mat > target_times_mat)
-
-            # Build uncertainty weights per patient
+            w_row = np.ones(n_samples, dtype=float)
             if censored_times.size > 0:
                 cg_model_uncert = CopulaGraphic(
-                    train_event_times, train_event_indicators,
-                    alpha=alpha, type=copula_name
+                    train_event_times,
+                    train_event_indicators,
+                    alpha=self.alpha,
+                    type=self.copula_name,
                 )
-                S_e = cg_model_uncert.predict(censored_times)
-                F_c = 1.0 - S_e
+                event_cdf_at_censoring = 1.0 - cg_model_uncert.predict(censored_times)
+                w_row[censored_mask] = np.clip(event_cdf_at_censoring, 0.0, 1.0)
 
-                gamma = 1.0
-                w_c = np.clip(F_c, 0.0, 1.0) ** gamma
-            else:
-                w_c = np.array([])
+            # Preserve the original normalization: the average observation
+            # weight is one, so uncertainty weighting does not change scale.
+            w_row /= w_row.mean() + 1e-12
+            weight_mat = np.repeat(w_row.reshape(-1, 1), n_times, axis=1)
 
-            w_row = np.ones(len(event_times), dtype=float)
-            if w_c.size > 0:
-                w_row[censored_mask] = w_c
-
-            w_row /= (w_row.mean() + 1e-12)
-            w_mat = np.repeat(w_row.reshape(-1, 1), repeats=len(time_points), axis=1)
-
-            weight_cat1 = weight_cat1 * w_mat
-            weight_cat2 = weight_cat2 * w_mat
+            square_error_mat = weight_mat * (
+                np.square(predict_probs_mat) * event_before_or_at
+                + np.square(1.0 - predict_probs_mat) * event_free
+            )
 
         elif method == "CG_Q":
             cg_model = CopulaGraphicWrapper(
                 train_event_times,
                 train_event_indicators,
-                copula_name=copula_name,
-                alpha=alpha,
+                copula_name=self.copula_name,
+                alpha=self.alpha,
             )
 
-            target_times_mat = np.repeat(
-                time_points.reshape(1, -1),
-                repeats=len(event_times),
-                axis=0,
-            )
-
-            event_times_mat = np.repeat(
-                event_times.reshape(-1, 1),
-                repeats=len(time_points),
-                axis=1,
-            )
-
-            observed_mask = event_indicators.astype(bool)
+            event_times_mat = np.repeat(event_times.reshape(-1, 1), n_times, axis=1)
+            observed_mask = event_indicators
             censored_mask = ~observed_mask
+            q_mat = np.zeros((n_samples, n_times), dtype=float)
 
-            q_mat = np.zeros_like(target_times_mat, dtype=float)
-
+            # For observed events, q_i(t) is the known survival status I(E_i > t).
             q_mat[observed_mask, :] = (
                 event_times_mat[observed_mask, :] > target_times_mat[observed_mask, :]
             ).astype(float)
 
-            censored_times = event_times[censored_mask]
-
-            if censored_times.size > 0:
-                q_mat[censored_mask, :] = (
-                    cg_model.conditional_survival_after_censoring(
-                        censored_times,
-                        time_points,
-                    )
+            # For censored observations, replace the unknown status with
+            # P(E_i > t | E_i > C_i) under the fitted copula-graphic model.
+            if np.any(censored_mask):
+                q_mat[censored_mask, :] = cg_model.conditional_survival_after_censoring(
+                    event_times[censored_mask],
+                    target_times,
                 )
 
             square_error_mat = (
@@ -252,30 +259,47 @@ class DependentEvaluator:
                 + (1.0 - q_mat) * np.square(predict_probs_mat)
             )
 
-            brier_scores = np.mean(square_error_mat, axis=0)
-
         else:
-            raise NotImplementedError()
-
-        if method in ["BG", "BG_UW"]:
-            square_error_mat = (
-                np.square(predict_probs_mat) * weight_cat1
-                + np.square(1.0 - predict_probs_mat) * weight_cat2
+            raise ValueError(
+                f"Unknown dependent Brier-score method {method!r}. "
+                "Expected one of {'BG', 'BG_UW', 'CG_Q'}."
             )
-            brier_scores = np.mean(square_error_mat, axis=0)
-    
+
+        brier_scores = np.mean(square_error_mat, axis=0)
         if np.isnan(brier_scores).any():
             warnings.warn("Time-dependent Brier Score contains nan")
-            bs_dict = {}
-            for time_point, b_score in zip(time_points, brier_scores):
-                bs_dict[time_point] = b_score
-            print("Brier scores for multiple time points are".format(bs_dict))
-            
-        integral_value = trapezoid(brier_scores, time_points)
-        ibs_score = integral_value / time_range
-        
-        return ibs_score
-    
+
+        return brier_scores
+
+    def brier_score(self, method: str, target_time: float) -> float:
+        """Compute the dependent Brier score at a single time point."""
+        target_time = np.asarray(target_time)
+        if target_time.ndim != 0:
+            raise TypeError("target_time must be a scalar.")
+
+        return float(
+            self.brier_score_multiple_points(
+                method=method,
+                target_times=np.array([float(target_time)]),
+            )[0]
+        )
+
+    def integrated_brier_score(self, method: str, num_points: int):
+        """Compute IBS by integrating the dependent Brier score over time."""
+        self._error_trainset("integrated dependent Brier score")
+        if not isinstance(num_points, (int, np.integer)) or num_points < 2:
+            raise ValueError("num_points must be an integer greater than or equal to 2.")
+
+        max_target_time = np.max(
+            np.concatenate((self.event_times, self.train_event_times))
+        )
+        if max_target_time <= 0:
+            raise ValueError("The maximum observed time must be positive to compute IBS.")
+
+        time_points = np.linspace(0.0, max_target_time, num_points)
+        brier_scores = self.brier_score_multiple_points(method, time_points)
+        return float(trapezoid(brier_scores, time_points) / max_target_time)
+
 class IndependentEvaluator:
     """
     Integrated Brier score under conditionally independent censoring.
