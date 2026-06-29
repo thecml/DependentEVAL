@@ -77,8 +77,6 @@ A patient who drops out because their health is deteriorating is not necessarily
 
 The result is that an evaluation metric can report a distorted prediction error rather than the error we would have obtained if every event time had been observed. A survival model may consequently appear better or worse simply because the evaluation method does not account for the dependence between event and censoring times.
 
----
-
 ## Can we identify dependent censoring from the data?
 
 Unfortunately, not without additional assumptions.
@@ -97,8 +95,6 @@ In practice, dependent censoring can instead be investigated using:
 The goal is therefore not to "discover" the true dependence structure from the observed data alone. Instead, we make the dependence assumptions explicit, estimate what can be estimated under those assumptions, and examine whether the conclusions are robust to other plausible choices.
 
 Any fitted copula parameter should consequently be interpreted as model-dependent rather than as assumption-free evidence that censoring is dependent.
-
----
 
 ## Fitting a copula model
 
@@ -135,8 +131,6 @@ $C_\theta(u_1,u_2) =
 $
 where $$\varphi_\theta$$ is the copula generator. Different copula families represent different kinds of dependence. For example, some place more emphasis on dependence among particularly short event and censoring times, while others describe dependence more symmetrically. Copula selection should therefore be based not only on empirical fit but also on what kinds of dependence are scientifically plausible in the application. Because the true copula is not identifiable from ordinary right-censored data, we recommend comparing several plausible specifications rather than treating one fitted family as unquestionable ground truth.
 
----
-
 ## What does this repository implement?
 
 The main contribution of the paper is the **dependent Brier score** and its integrated version, **IBS-Dep**, for evaluating survival models under dependent censoring.
@@ -159,8 +153,6 @@ Reusable implementations are located in [`src/`](src/).
 Experiment entry points are provided in [`scripts/`](scripts/) and [`src/experiments/`](src/experiments/).
 
 The analysis and figure-generation code is available in [`notebooks/`](notebooks/).
-
----
 
 ## How do I use the metric?
 
@@ -200,8 +192,8 @@ It can also be run with pytest:
 pytest -q test_dep_brier_score.py
 ```
 
-Citation
---------
+## Citation
+
 If you find this paper useful in your work, please consider citing it:
  
 ```
