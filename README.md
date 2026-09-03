@@ -197,10 +197,12 @@ pytest -q test_dep_brier_score.py
 If you find this paper useful in your work, please consider citing it:
  
 ```
-@article{lillelund_overcoming_2025,
-  title={Overcoming Dependent Censoring in the Evaluation of Survival Models}, 
-  author={Christian Marius Lillelund and Shi-ang Qi and Russell Greiner},
-  journal={preprint, arXiv:2502.19460},
-  year={2025},
+@inproceedings{lillelund2026overcoming,
+  title     = {Overcoming Dependent Censoring in the Evaluation of Survival Models},
+  author    = {Lillelund, Christian Marius and Qi, Shi-ang and Greiner, Russell},
+  booktitle = {Proceedings of the 42nd Conference on Uncertainty in Artificial Intelligence},
+  volume    = {337},
+  pages     = {3841--3866},
+  year      = {2026}
 }
 ```
